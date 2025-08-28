@@ -1,11 +1,13 @@
-torch>=2.4.0
+torch>=2.8.0
 transformers>=4.55.0
+datasets>=2.19.0
 peft>=0.17.0
 trl>=0.20.0
-datasets>=2.19.0
-accelerate>=0.32.0
-bitsandbytes>=0.43.0
-huggingface_hub>=0.23.0
-tokenizers>=0.19.0
-wandb>=0.18.0
-unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+huggingface_hub
+accelerate
+bitsandbytes
+einops
+safetensors
+jinja2
+ipython
+biopython
