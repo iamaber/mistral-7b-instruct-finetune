@@ -1,13 +1,14 @@
-torch>=2.8.0
-transformers>=4.55.0
-datasets>=2.19.0
-peft>=0.17.0
-trl>=0.20.0
-huggingface_hub
-accelerate
-bitsandbytes
-einops
-safetensors
-jinja2
-ipython
-biopython
+# requirements.txt
+torch==2.8.0
+transformers==4.41.2
+datasets==2.20.0
+accelerate==0.30.1
+peft==0.11.1
+bitsandbytes==0.43.1
+evaluate==0.4.2
+scipy==1.13.1
+numpy==1.26.4
+pandas==2.2.2
+tokenizers==0.19.1
+wandb==0.17.4
+lm-eval==0.4.2
