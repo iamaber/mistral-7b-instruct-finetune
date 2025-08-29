@@ -1,11 +1,11 @@
-torch==2.1.0
-torchaudio==2.1.0
-torchvision==0.16.0
-transformers==4.36.0
-datasets==2.15.0
-accelerate==0.25.0
-bitsandbytes==0.41.3
-peft==0.7.0
-trl==0.7.4
-deepspeed==0.12.2
-wandb==0.16.0
+torch>=2.4.0
+transformers>=4.55.0
+peft>=0.17.0
+trl>=0.20.0
+datasets>=2.19.0
+accelerate>=0.32.0
+bitsandbytes>=0.43.0
+huggingface_hub>=0.23.0
+tokenizers>=0.19.0
+wandb>=0.18.0
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
