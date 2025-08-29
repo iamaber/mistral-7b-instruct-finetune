@@ -1,0 +1,5 @@
+{
+    "pubmedqa": {
+        "accuracy": 0.73,
+        "f1": 0.702347144456887,
+        "confusion_matrix": 
