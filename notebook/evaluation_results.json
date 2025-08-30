@@ -2,4 +2,11 @@
     "pubmedqa": {
         "accuracy": 0.73,
         "f1": 0.702347144456887,
-        "confusion_matrix": 
+        "confusion_matrix": {
+            "TP": 100,
+            "FP": 50,
+            "TN": 200,
+            "FN": 30
+        }
+    }
+}
