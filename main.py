@@ -33,6 +33,10 @@ class MistralPubMedQAFineTuner:
         self.dataset = None
         self.tokenized_dataset = None
 
+        # Check GPU availability
+        if not torch.cuda.is_available():
+            logger.warning("CUDA not available. Training will be slow on CPU.")
+
         # Set seeds for reproducibility
         self.set_seed(config.get("seed", 42))
 
@@ -326,7 +330,7 @@ class MistralPubMedQAFineTuner:
             self.model.eval()
 
             for example in tqdm(medical_data, desc="Evaluating MMLU"):
-                prompt = f"The following are multiple choice questions about medical knowledge.\n\n"
+                prompt = "The following are multiple choice questions about medical knowledge.\n"
                 prompt += f"Question: {example['question']}\n"
                 for i, choice in enumerate(example["choices"]):
                     prompt += f"{chr(65 + i)}. {choice}\n"
