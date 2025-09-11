@@ -138,10 +138,10 @@ Question: {question} [/INST] {answer}</s>
 ## 📝 Citation
 
 ```bibtex
-@misc{mistral-pubmedqa-2024,
+@misc{mistral-pubmedqa-2025,
   title={Fine-tuning Mistral-7B for Medical Question Answering},
   author={Aber Islam},
-  year={2024},
+  year={2025},
   note={Fine-tuned on PubMedQA dataset using LoRA}
 }
 ```
