@@ -18,6 +18,7 @@ seaborn>=0.12.0
 # Hugging Face integration
 huggingface_hub>=0.17.0
 accelerate>=0.24.0
+sentencepiece>=0.1.99
 
 # Experiment tracking
 wandb>=0.15.0
