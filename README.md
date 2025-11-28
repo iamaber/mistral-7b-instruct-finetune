@@ -1,147 +1,135 @@
-# Mistral-7B Fine-tuning for Medical Question Answering
+# PubMedQA Mistral Fine-Tuning Workspace
 
-This project fine-tunes the Mistral-7B-Instruct model on the PubMedQA dataset for medical question answering using Parameter Efficient Fine-Tuning (PEFT) with LoRA adapters.
+This repo is organized as a small experiment workspace for comparing two LoRA-based runs on PubMedQA:
 
-## 🎯 Project Overview
+- `baseline_current_lora`: keeps the existing full-prompt training behavior
+- `sft_masked_lora`: adds an explicit masked-answer SFT run for cleaner supervision
 
-- **Base Model**: `mistralai/Mistral-7B-Instruct-v0.3`
-- **Dataset**: PubMedQA (Biomedical Question Answering)
-- **Method**: LoRA (Low-Rank Adaptation)
-- **Task**: Medical Question Answering (Yes/No/Maybe classification)
+Both runs save models, tokenizers, checkpoints, and evaluation outputs into separate folders so you can compare them directly.
 
-## 📊 Model Details
+## Repository Layout
 
-### Tokenizer Configuration
-- **Vocabulary Size**: 32,768 tokens
-- **Special Tokens**: 1,024 control tokens ([control_0] to [control_1023])
-- **Padding Token**: Set to EOS token
-- **Max Length**: 512 tokens
-
-### LoRA Configuration
-```json
-{
-  "r": 16,
-  "lora_alpha": 32,
-  "lora_dropout": 0.05,
-  "bias": "none",
-  "task_type": "CAUSAL_LM",
-  "target_modules": [
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj"
-  ]
-}
+```text
+.
+├── configs/                           # Experiment configs
+├── data/
+│   └── raw/                           # Downloaded PubMedQA dataset (gitignored)
+├── docs/                              # Reference docs and papers
+├── models/
+│   ├── base/                          # Downloaded base model weights (gitignored)
+│   ├── baselines/current_lora/        # Preserved existing artifacts
+│   └── runs/                          # New training outputs (gitignored)
+├── notebooks/                         # Original exploration notebook
+├── reports/evaluations/               # Metrics JSON and plots
+├── scripts/                           # Download, train, compare entrypoints
+├── src/mistral_pubmedqa/              # Shared code
+├── .env                               # Local credentials
+└── main.py                            # Baseline convenience entrypoint
 ```
 
-### Training Parameters
-- **Trainable Parameters**: 41,943,040 (0.58% of total)
-- **Total Parameters**: 7,289,966,592
-- **Training Regime**: bfloat16 mixed precision
-- **Optimizer**: AdamW
-- **Learning Rate**: 2e-4
-- **Batch Size**: 4 per device
-- **Gradient Accumulation**: 4 steps
-- **Epochs**: 3
+## Preserved Existing Artifacts
 
-## 🚀 Quick Start
+- Existing adapter-only weights: `models/baselines/current_lora/adapter_only/`
+- Existing exported bundle: `models/baselines/current_lora/exported_adapter_bundle/`
+- Existing metrics and plot:
+  - `reports/evaluations/baseline_current_lora_metrics.json`
+  - `reports/evaluations/baseline_current_lora_confusion_matrix.png`
 
-### Installation
+## New Output Locations
+
+### Downloaded inputs
+
+- Base model weights: `models/base/Mistral-7B-Instruct-v0.3/`
+- Saved PubMedQA dataset: `data/raw/pubmedqa/pqa_labeled/`
+
+### Fresh training outputs
+
+- Baseline checkpoints: `models/runs/baseline_current_lora/checkpoints/`
+- Baseline adapter: `models/runs/baseline_current_lora/adapter/`
+- Baseline tokenizer: `models/runs/baseline_current_lora/tokenizer/`
+- Baseline metrics: `reports/evaluations/baseline_current_lora.json`
+
+- SFT checkpoints: `models/runs/sft_masked_lora/checkpoints/`
+- SFT adapter: `models/runs/sft_masked_lora/adapter/`
+- SFT tokenizer: `models/runs/sft_masked_lora/tokenizer/`
+- SFT metrics: `reports/evaluations/sft_masked_lora.json`
+
+These paths make the before/after comparison explicit:
+
+- before: `models/baselines/current_lora/...`
+- after baseline rerun: `models/runs/baseline_current_lora/...`
+- after SFT rerun: `models/runs/sft_masked_lora/...`
+
+## Credentials
+
+Set credentials in `.env`:
+
+```dotenv
+HF_TOKEN=...
+WANDB_API_KEY=...
+WANDB_PROJECT=pubmedqa-mistral-comparison
+WANDB_ENTITY=...
+WANDB_MODE=offline
+RUNPOD_API_KEY=...
+RUNPOD_POD_ID=...
+```
+
+Switch `WANDB_MODE` to `online` once the API key is set on the machine or RunPod pod.
+
+## Install
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Using the Notebook
-Open and run [`mistral-7b-instruct-finetune.ipynb`](mistral-7b-instruct-finetune.ipynb) for step-by-step fine-tuning.
+## Download Assets
 
-### Using the Script
 ```bash
-python main.py
+. .venv/bin/activate
+python scripts/download_assets.py
 ```
 
-### Loading the Fine-tuned Model
+If you only want one asset:
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
-
-# Load base model and tokenizer
-base_model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
-tokenizer = AutoTokenizer.from_pretrained("./mistral-pubmedqa-finetune")
-
-# Load LoRA adapter
-model = PeftModel.from_pretrained(base_model, "./mistral-pubmedqa-adapter")
-
-# Example usage
-context = "Regular exercise has been shown to reduce cardiovascular disease risk."
-question = "Does exercise reduce heart disease risk?"
-prompt = f"<s>[INST] Context: {context}\n\nQuestion: {question} [/INST]"
-
-inputs = tokenizer(prompt, return_tensors="pt")
-outputs = model.generate(**inputs, max_new_tokens=10)
-answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+```bash
+python scripts/download_assets.py --dataset-only
+python scripts/download_assets.py --model-only
 ```
 
-## 📈 Performance
+Local storage note: the base `Mistral-7B-Instruct-v0.3` checkpoint is larger than the remaining free space on this machine after dependency installation, so the full model download should be done on the RunPod volume instead of this local workstation.
 
-### PubMedQA Results
-- **Accuracy**: 73.0%
-- **F1 Score**: 70.23%
+## Train
 
-### MMLU Medical Tasks
-- **Overall Accuracy**: 56.0%
-- **Anatomy**: 56.0%
+Baseline rerun:
 
-## 📁 File Structure
-
-```
-├── main.py                           # Main training script
-├── mistral-7b-instruct-finetune.ipynb # Jupyter notebook
-├── mistral-pubmedqa-finetune/        # Fine-tuned model
-│   ├── adapter_config.json
-│   ├── tokenizer_config.json
-│   └── ...
-├── mistral-pubmedqa-adapter/         # LoRA adapter
-│   ├── adapter_config.json
-│   ├── adapter_model.safetensors
-│   └── README.md
-├── evaluation_results.json          # Evaluation metrics
-├── pubmedqa_confusion_matrix.png    # Confusion matrix visualization
-└── requirements.txt                 # Dependencies
+```bash
+. .venv/bin/activate
+python scripts/train_baseline.py
 ```
 
-## 🔬 Technical Implementation
+Masked-answer SFT run:
 
-The fine-tuning process involves:
-
-1. **Data Preprocessing**: Format PubMedQA examples into Mistral's instruction format
-2. **LoRA Application**: Apply low-rank adapters to attention and MLP layers
-3. **Training**: Use custom data collator for causal language modeling
-4. **Evaluation**: Test on both PubMedQA and MMLU medical tasks
-
-### Prompt Format
-```
-<s>[INST] Context: {medical_context}
-
-Question: {question} [/INST] {answer}</s>
+```bash
+. .venv/bin/activate
+python scripts/train_sft.py
 ```
 
-## 🛠️ Dependencies
+## Compare Results
 
-- transformers >= 4.0.0
-- datasets >= 4.0.0
-- peft >= 0.11.1
-- torch
-- numpy
-- scikit-learn
-- tqdm
+```bash
+. .venv/bin/activate
+python scripts/compare_runs.py
+```
 
-## 📝 Citation
+## RunPod Notes
 
-```bibtex
-@misc{mistral-pubmedqa-2025,
-  title={Fine-tuning Mistral-7B for Medical Question Answering},
-  author={Aber Islam},
-  year={2025},
-  note={Fine-tuned on PubMedQA dataset using LoRA}
-}
+- Put the repo on a persistent RunPod volume before downloading the base model.
+- Keep `models/base/`, `models/runs/`, and `data/raw/` on the mounted volume so training can resume without re-downloading.
+- Fill `.env` on the pod before launching training so W&B logging is enabled automatically.
+- Bootstrap the pod with:
+
+```bash
+bash scripts/runpod_bootstrap.sh
 ```
