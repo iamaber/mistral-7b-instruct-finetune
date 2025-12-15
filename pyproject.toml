@@ -1,25 +1,35 @@
 [project]
-name = "mistral-pubmed-finetuned"
+name = "pubmedqa-loraplus"
 version = "0.1.0"
-description = "Comparison workspace for baseline LoRA and masked-answer SFT on PubMedQA."
+description = "Single-purpose LoRA+ fine-tuning workspace for PubMedQA."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "accelerate>=0.24.0",
     "datasets>=2.14.0",
     "huggingface_hub>=0.17.0",
-    "matplotlib>=3.7.0",
     "numpy>=1.24.0",
-    "packaging>=23.0",
-    "pandas>=2.0.0",
     "peft>=0.6.0",
-    "psutil>=5.9.0",
     "scikit-learn>=1.3.0",
-    "seaborn>=0.12.0",
     "sentencepiece>=0.1.99",
     "torch>=2.0.0",
     "tqdm>=4.65.0",
     "transformers>=4.35.0",
-    "trl>=0.7.0",
     "wandb>=0.15.0",
 ]
+
+[project.optional-dependencies]
+unsloth = [
+    "unsloth",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E402"]  # Allow late imports in scripts/ for sys.path manipulation
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402", "T201"]  # Allow late imports and print() in scripts

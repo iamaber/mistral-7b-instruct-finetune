@@ -1,82 +1,29 @@
-# PubMedQA Mistral Fine-Tuning Workspace
+# PubMedQA LoRA+ Fine-Tuning
 
-This repo is organized as a small experiment workspace for comparing two LoRA-based runs on PubMedQA:
+This repository is a single-purpose LoRA+ training workspace for fine-tuning instruct models on `qiaojin/PubMedQA`. The codebase is organized around one masked-answer training flow, one evaluation flow, one export flow, and one Hugging Face publishing flow.
 
-- `baseline_current_lora`: keeps the existing full-prompt training behavior
-- `sft_masked_lora`: adds an explicit masked-answer SFT run for cleaner supervision
+The model-loading path is explicitly non-quantized. The base model is always loaded as a full-precision model dtype (`float32`, `float16`, or `bfloat16`), controlled by `model_dtype` in [`configs/loraplus_train.json`](/home/abir/Repos/mistral-7b-instruct-finetune/configs/loraplus_train.json).
 
-Both runs save models, tokenizers, checkpoints, and evaluation outputs into separate folders so you can compare them directly.
+## What This Repo Contains
 
-## Repository Layout
+- `configs/loraplus_train.json`: the single training config
+- `src/pubmedqa_loraplus/`: shared LoRA+, evaluation, export, and publishing logic
+- `scripts/prepare_assets.py`: downloads the PubMedQA dataset and the base model
+- `scripts/train.py`: runs the LoRA+ training job
+- `scripts/evaluate.py`: evaluates an adapter or merged artifact
+- `scripts/export_model.py`: exports adapter and merged model artifacts
+- `scripts/push_to_hub.py`: pushes the adapter or merged artifact to Hugging Face
+- `notebooks/pubmedqa_loraplus_kaggle.ipynb`: a self-contained Kaggle notebook designed for two T4 GPUs
 
-```text
-.
-├── configs/                           # Experiment configs
-├── data/
-│   └── raw/                           # Downloaded PubMedQA dataset (gitignored)
-├── docs/                              # Reference docs and papers
-├── models/
-│   ├── base/                          # Downloaded base model weights (gitignored)
-│   ├── baselines/current_lora/        # Preserved existing artifacts
-│   └── runs/                          # New training outputs (gitignored)
-├── notebooks/                         # Original exploration notebook
-├── reports/evaluations/               # Metrics JSON and plots
-├── scripts/                           # Download, train, compare entrypoints
-├── src/mistral_pubmedqa/              # Shared code
-├── .env                               # Local credentials
-└── main.py                            # Baseline convenience entrypoint
-```
+## Training Objective
 
-## Preserved Existing Artifacts
+The project trains with masked-answer supervision:
 
-- Existing adapter-only weights: `models/baselines/current_lora/adapter_only/`
-- Existing exported bundle: `models/baselines/current_lora/exported_adapter_bundle/`
-- Existing metrics and plot:
-  - `reports/evaluations/baseline_current_lora_metrics.json`
-  - `reports/evaluations/baseline_current_lora_confusion_matrix.png`
+- prompt tokens are masked in the labels
+- only the answer tokens contribute to the loss
+- PubMedQA task metrics and a medical MMLU slice are reported for each run
 
-## New Output Locations
-
-### Downloaded inputs
-
-- Base model weights: `models/base/Mistral-7B-Instruct-v0.3/`
-- Saved PubMedQA dataset: `data/raw/pubmedqa/pqa_labeled/`
-
-### Fresh training outputs
-
-- Baseline checkpoints: `models/runs/baseline_current_lora/checkpoints/`
-- Baseline adapter: `models/runs/baseline_current_lora/adapter/`
-- Baseline tokenizer: `models/runs/baseline_current_lora/tokenizer/`
-- Baseline metrics: `reports/evaluations/baseline_current_lora.json`
-
-- SFT checkpoints: `models/runs/sft_masked_lora/checkpoints/`
-- SFT adapter: `models/runs/sft_masked_lora/adapter/`
-- SFT tokenizer: `models/runs/sft_masked_lora/tokenizer/`
-- SFT metrics: `reports/evaluations/sft_masked_lora.json`
-
-These paths make the before/after comparison explicit:
-
-- before: `models/baselines/current_lora/...`
-- after baseline rerun: `models/runs/baseline_current_lora/...`
-- after SFT rerun: `models/runs/sft_masked_lora/...`
-
-## Credentials
-
-Set credentials in `.env`:
-
-```dotenv
-HF_TOKEN=...
-WANDB_API_KEY=...
-WANDB_PROJECT=pubmedqa-mistral-comparison
-WANDB_ENTITY=...
-WANDB_MODE=offline
-RUNPOD_API_KEY=...
-RUNPOD_POD_ID=...
-```
-
-Switch `WANDB_MODE` to `online` once the API key is set on the machine or RunPod pod.
-
-## Install
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -84,52 +31,98 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Download Assets
+Environment variables live in `.env`:
+
+```dotenv
+HF_TOKEN=
+WANDB_API_KEY=
+WANDB_PROJECT=pubmedqa-loraplus
+WANDB_ENTITY=
+WANDB_MODE=offline
+RUNPOD_API_KEY=
+RUNPOD_POD_ID=
+```
+
+## Asset Preparation
 
 ```bash
 . .venv/bin/activate
-python scripts/download_assets.py
+python scripts/prepare_assets.py
 ```
 
-If you only want one asset:
+Optional:
 
 ```bash
-python scripts/download_assets.py --dataset-only
-python scripts/download_assets.py --model-only
+python scripts/prepare_assets.py --dataset-only
+python scripts/prepare_assets.py --model-only
 ```
 
-Local storage note: the base `Mistral-7B-Instruct-v0.3` checkpoint is larger than the remaining free space on this machine after dependency installation, so the full model download should be done on the RunPod volume instead of this local workstation.
+## Cloud Training
 
-## Train
-
-Baseline rerun:
+Run the main training flow with `accelerate`:
 
 ```bash
 . .venv/bin/activate
-python scripts/train_baseline.py
+accelerate launch scripts/train.py --config configs/loraplus_train.json
 ```
 
-Masked-answer SFT run:
+Outputs are written under:
+
+- checkpoints: `models/runs/pubmedqa-loraplus/checkpoints/`
+- adapter: `models/runs/pubmedqa-loraplus/adapter/`
+- tokenizer: `models/runs/pubmedqa-loraplus/tokenizer/`
+- merged model: `models/runs/pubmedqa-loraplus/merged/`
+- reports: `reports/runs/`
+
+## Evaluation
+
+Evaluate the saved adapter:
 
 ```bash
 . .venv/bin/activate
-python scripts/train_sft.py
+python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapter
 ```
 
-## Compare Results
+Evaluate the merged model:
+
+```bash
+python scripts/evaluate.py --config configs/loraplus_train.json --artifact merged
+```
+
+## Export
+
+Export the adapter and merged model artifacts:
 
 ```bash
 . .venv/bin/activate
-python scripts/compare_runs.py
+python scripts/export_model.py --config configs/loraplus_train.json
 ```
 
-## RunPod Notes
-
-- Put the repo on a persistent RunPod volume before downloading the base model.
-- Keep `models/base/`, `models/runs/`, and `data/raw/` on the mounted volume so training can resume without re-downloading.
-- Fill `.env` on the pod before launching training so W&B logging is enabled automatically.
-- Bootstrap the pod with:
+To export from a specific adapter checkpoint directory:
 
 ```bash
-bash scripts/runpod_bootstrap.sh
+python scripts/export_model.py \
+  --config configs/loraplus_train.json \
+  --checkpoint models/runs/pubmedqa-loraplus/checkpoints/checkpoint-200
 ```
+
+## Publish To Hugging Face
+
+Set `adapter_hub_repo_id` and `merged_hub_repo_id` in `configs/loraplus_train.json`, then push the desired artifact:
+
+```bash
+. .venv/bin/activate
+python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
+python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact merged
+```
+
+## Kaggle Notebook
+
+Use [notebooks/pubmedqa_loraplus_kaggle.ipynb](/home/abir/Repos/mistral-7b-instruct-finetune/notebooks/pubmedqa_loraplus_kaggle.ipynb) for Kaggle. The notebook is self-contained, targets both T4 GPUs, and defaults to a smaller full-precision instruct model until the final base model details are fixed.
+# Additional update 2025-12-15
+# Additional update 2025-12-16
+# Additional update 2025-12-19
+# Additional update 2025-12-31
+# Additional update 2025-12-31
+# Additional update 2025-12-31
+# Additional update 2025-12-31
