@@ -17,8 +17,6 @@ def load_env_file(env_path: str | Path = ".env") -> Path:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip("'").strip('"')
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(key.strip(), value.strip().strip("'").strip('"'))
 
     return path

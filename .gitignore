@@ -8,3 +8,5 @@ data/raw/
 data/cache/
 models/base/
 models/runs/
+reports/runs/
+.ipynb_checkpoints/
