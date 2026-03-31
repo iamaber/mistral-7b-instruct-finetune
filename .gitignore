@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 wandb/
-data/raw/
+data/pubmedqa/
 data/cache/
 models/base/
 models/runs/
