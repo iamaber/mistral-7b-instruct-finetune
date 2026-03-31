@@ -6,7 +6,7 @@ __pycache__/
 wandb/
 data/pubmedqa/
 data/cache/
-models/base/
-models/runs/
-reports/runs/
+models/base_model/
+models/pubmedqa-loraplus/
+reports/
 .ipynb_checkpoints/
