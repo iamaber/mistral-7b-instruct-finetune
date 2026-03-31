@@ -119,10 +119,3 @@ python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact me
 ## Kaggle Notebook
 
 Use [notebooks/pubmedqa_loraplus_kaggle.ipynb](/home/abir/Repos/mistral-7b-instruct-finetune/notebooks/pubmedqa_loraplus_kaggle.ipynb) for Kaggle. The notebook is self-contained, targets both T4 GPUs, and defaults to a smaller full-precision instruct model until the final base model details are fixed.
-# Additional update 2025-12-15
-# Additional update 2025-12-16
-# Additional update 2025-12-19
-# Additional update 2025-12-31
-# Additional update 2025-12-31
-# Additional update 2025-12-31
-# Additional update 2025-12-31
