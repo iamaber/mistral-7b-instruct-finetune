@@ -87,6 +87,8 @@ class LoRAPlusConfig:
             raise ValueError(
                 f"model_dtype must be one of {sorted(VALID_MODEL_DTYPES)}"
             )
+        if self.modal_timeout_minutes <= 0:
+            raise ValueError("modal_timeout_minutes must be > 0")
 
         if self.resume_from_checkpoint is not None:
             self.resume_from_checkpoint = str(resolve_repo_path(self.resume_from_checkpoint))
