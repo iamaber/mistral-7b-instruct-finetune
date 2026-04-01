@@ -4,7 +4,7 @@
   "base_model_path": "models/base_model",
   "dataset_id": "qiaojin/PubMedQA",
   "dataset_config": "pqa_labeled",
-  "dataset_disk_path": "data/raw/pubmedqa/pqa_labeled",
+  "dataset_disk_path": "data/pubmedqa",
   "output_root": "models/runs/pubmedqa-loraplus",
   "reports_root": "reports/runs",
   "modal_volume_name": "pubmedqa-loraplus",
