@@ -27,6 +27,12 @@ class LoRAPlusConfig:
     dataset_disk_path: Path
     output_root: Path
     reports_root: Path
+    modal_volume_name: str = "pubmedqa-loraplus"
+    modal_mount_root: str = "/vol/pubmedqa-loraplus"
+    modal_gpu: str = "A100"
+    modal_timeout_minutes: int = 1440
+    modal_secret_name: str = "pubmedqa-loraplus-secrets"
+    modal_image_name: str = "pubmedqa-loraplus"
     model_dtype: str = "auto"
     test_size: float = 0.1
     seed: int = 42
