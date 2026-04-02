@@ -79,7 +79,7 @@ Common environment overrides the notebook accepts:
 
 ## Training Objective
 
-The project uses masked-answer supervision:
+The project trains with masked-answer supervision:
 
 - prompt tokens are masked in the labels
 - only answer tokens contribute to the loss
