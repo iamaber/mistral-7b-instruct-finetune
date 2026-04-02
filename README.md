@@ -93,7 +93,7 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-For local fallback, environment variables live in `.env`:
+Environment variables live in `.env`:
 
 ```dotenv
 HF_TOKEN=
