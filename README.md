@@ -120,6 +120,15 @@ Evaluate the merged model:
 python scripts/evaluate.py --config configs/loraplus_train.json --artifact merged
 ```
 
+## Export
+
+Export the adapter and merged model artifacts:
+
+```bash
+. .venv/bin/activate
+python scripts/export_model.py --config configs/loraplus_train.json
+```
+
 ## Notebook
 
 Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_notebook.ipynb). It is Modal-first:
