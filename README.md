@@ -129,6 +129,16 @@ Export the adapter and merged model artifacts:
 python scripts/export_model.py --config configs/loraplus_train.json
 ```
 
+## Publish To Hugging Face
+
+Set `adapter_hub_repo_id` and `merged_hub_repo_id` in `configs/loraplus_train.json`, then push the desired artifact:
+
+```bash
+. .venv/bin/activate
+python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
+python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact merged
+```
+
 ## Notebook
 
 Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_notebook.ipynb). It is Modal-first:
