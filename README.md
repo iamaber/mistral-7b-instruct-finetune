@@ -117,7 +117,7 @@ Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_not
 
 ## Secondary Helpers
 
-The scripts remain available as secondary helpers for automation and local fallback:
+The scripts are still available for automation and local fallback, but they are no longer the primary documented path:
 
 ```bash
 . .venv/bin/activate
