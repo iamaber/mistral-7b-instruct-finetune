@@ -112,7 +112,7 @@ Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_not
 - no Kaggle assumptions
 - no subprocess call into `scripts/train.py`
 - no fixed two-GPU requirement
-- direct in-notebook LoRA+ training on a single strong GPU, no quantization
+- direct in-notebook LoRA+ training on a single strong GPU
 - persistence through the mounted Modal Volume
 
 ## Secondary Helpers
