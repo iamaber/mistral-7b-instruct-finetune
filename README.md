@@ -105,6 +105,21 @@ BASE_MODEL_ID=
 PUBMEDQA_MODAL_ROOT=/vol/pubmedqa-loraplus
 ```
 
+## Evaluation
+
+Evaluate the saved adapter:
+
+```bash
+. .venv/bin/activate
+python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapter
+```
+
+Evaluate the merged model:
+
+```bash
+python scripts/evaluate.py --config configs/loraplus_train.json --artifact merged
+```
+
 ## Notebook
 
 Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_notebook.ipynb). It is Modal-first:
