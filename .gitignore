@@ -1,4 +1,3 @@
-.env
 .venv/
 __pycache__/
 *.pyc
@@ -10,3 +9,4 @@ models/base_model/
 models/pubmedqa-loraplus/
 reports/
 .ipynb_checkpoints/
+.env
