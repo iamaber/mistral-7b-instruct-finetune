@@ -11,6 +11,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from peft.optimizers import create_loraplus_optimizer
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
+from .artifact import prepare_adapter_for_publish
 from .config import LoRAPlusConfig
 from .data import CompletionOnlyCollator, load_pubmedqa, tokenize_dataset
 from .evaluation import run_evaluation_suite
@@ -226,6 +227,7 @@ def train_model(config: LoRAPlusConfig) -> dict[str, Any]:
     config.tokenizer_output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(config.adapter_output_dir))
     tokenizer.save_pretrained(str(config.tokenizer_output_dir))
+    prepare_adapter_for_publish(config.adapter_output_dir, config.base_model_id)
 
     evaluation = run_evaluation_suite(model, tokenizer, dataset["test"], config)
     report = _build_report(config, dataset, trainer, train_result, evaluation)
@@ -300,6 +302,7 @@ def export_artifacts(
 
     adapter_model.save_pretrained(str(config.adapter_output_dir))
     tokenizer.save_pretrained(str(config.tokenizer_output_dir))
+    prepare_adapter_for_publish(config.adapter_output_dir, config.base_model_id)
 
     merged_model = adapter_model.merge_and_unload()
     merged_model.save_pretrained(
