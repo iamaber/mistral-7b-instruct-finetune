@@ -21,10 +21,11 @@ def score_candidate(
 
     A causal LM's logits at position ``i`` predict the token at position
     ``i + 1``. The first candidate token therefore has to be scored with the
-    logits at ``prompt_length - 1`` (the last prompt position), not at
-    ``prompt_length``. Indexing from ``prompt_length`` shifts every candidate
-    token by one and ends up scoring the token that follows the answer,
-    which for every label is the same trailing ``</s>``.
+    logits at ``prompt_length - 1`` (the last prompt position). Indexing from
+    ``prompt_length`` instead never reads the position that predicts the first
+    answer token, so the only logit carrying the label decision is skipped:
+    for ``" yes</s>"`` / ``" no</s>"`` / ``" maybe</s>"`` the position that
+    predicts ``yes`` / ``no`` / ``maybe`` is never consulted.
     """
     if prompt_length < 1:
         raise ValueError("prompt_length must be >= 1")
@@ -43,10 +44,15 @@ def normalise_candidate_scores(
 ) -> dict[str, float]:
     """Convert summed log-probabilities into per-token average log-probabilities.
 
-    Summing log-probabilities over a candidate penalises longer candidates even
-    when they are equally likely per token: every extra token adds another
-    negative term. Averaging removes that length bias so that, for example,
-    ``maybe`` (several tokens) is not systematically beaten by ``yes``.
+    Summing log-probabilities prefers shorter candidates when the candidates
+    have different token counts, because every extra token adds another
+    negative term. Averaging removes that bias.
+
+    The published PubMedQA candidates were ``" yes</s>"``, ``" no</s>"`` and
+    ``" maybe</s>"``; each is two tokens, so this bias did not contribute to
+    that particular collapse. It is fixed regardless because labels such as
+    ``" maybe"`` split differently with other tokenizers, and the MMLU
+    candidates are scored by the same function.
     """
     if set(raw_scores) != set(candidate_token_counts):
         raise ValueError("raw_scores and candidate_token_counts must have identical keys")
@@ -104,7 +110,11 @@ def accuracy(references: Sequence[str], predictions: Sequence[str]) -> float:
         return 0.0
     if len(references) != len(predictions):
         raise ValueError("references and predictions must have the same length")
-    correct = sum(1 for reference, prediction in zip(references, predictions) if reference == prediction)
+    correct = sum(
+        1
+        for reference, prediction in zip(references, predictions)
+        if reference == prediction
+    )
     return correct / len(references)
 
 
@@ -223,3 +233,23 @@ def subject_sample_plan(
         share = per_subject + (1 if position < remainder else 0)
         plan[subject] = min(max(share, 1), subject_totals.get(subject, 0))
     return plan
+
+
+def select_subject_rows(
+    row_subjects: Sequence[str],
+    plan: Mapping[str, int],
+) -> list[int]:
+    """Return row indices that satisfy ``plan``, preserving the original order.
+
+    Kept separate from ``subject_sample_plan`` so the selection can be tested
+    against a row order without a dataset or a model. The published run did not
+    use a plan at all: it kept the first rows of the filtered split, which are
+    all ``anatomy``.
+    """
+    remaining = dict(plan)
+    selected: list[int] = []
+    for row_index, subject in enumerate(row_subjects):
+        if remaining.get(subject, 0) > 0:
+            selected.append(row_index)
+            remaining[subject] -= 1
+    return selected
