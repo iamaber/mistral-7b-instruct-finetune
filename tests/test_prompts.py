@@ -1,7 +1,9 @@
 """CPU-only tests for prompt formatting and token budgeting.
 
-Long PubMedQA abstracts used to lose the ``Question: ... [/INST]`` suffix
-because the joined prompt was sliced from the left.
+Left-slicing a joined prompt drops the ``Question: ... [/INST]`` suffix once
+the abstract exceeds the budget. That did not happen on the published run (its
+longest of 100 prompts was 688 tokens against a 1024 budget), but the guard is
+what keeps the instruction suffix intact for longer inputs.
 """
 
 import pytest
