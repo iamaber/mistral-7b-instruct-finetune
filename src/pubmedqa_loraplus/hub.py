@@ -6,14 +6,24 @@ from typing import Any
 from .artifact import prepare_adapter_for_publish
 from .config import LoRAPlusConfig
 
-PUBMEDQA_CITATION = """@inproceedings{jin2019pubmedqa,
-  title     = {{PubMedQA}: A Dataset for Biomedical Research Question Answering},
-  author    = {Jin, Qiao and Dhingra, Bhuwan and Liu, Zhengping and Cohen, William W. and Lu, Xinghua},
-  booktitle = {Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing (EMNLP-IJCNLP)},
-  year      = {2019},
-  pages     = {2567--2577},
-  url       = {https://aclanthology.org/D19-1259/}
-}"""
+PUBMEDQA_CITATION = "\n".join(
+    [
+        "@inproceedings{jin2019pubmedqa,",
+        "  title     = {{PubMedQA}: A Dataset for Biomedical Research Question Answering},",
+        (
+            "  author    = {Jin, Qiao and Dhingra, Bhuwan and Liu, Zhengping "
+            "and Cohen, William W. and Lu, Xinghua},"
+        ),
+        (
+            "  booktitle = {Proceedings of the 2019 Conference on Empirical Methods "
+            "in Natural Language Processing (EMNLP-IJCNLP)},"
+        ),
+        "  year      = {2019},",
+        "  pages     = {2567--2577},",
+        "  url       = {https://aclanthology.org/D19-1259/}",
+        "}",
+    ]
+)
 
 
 def _load_report(config: LoRAPlusConfig) -> dict[str, Any] | None:
@@ -95,7 +105,10 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
             f"| Accuracy | {_format_metric(pubmedqa.get('accuracy'))} |",
             f"| Macro F1 | {_format_metric(pubmedqa.get('macro_f1'))} |",
             f"| Weighted F1 | {_format_metric(pubmedqa.get('weighted_f1'))} |",
-            f"| Majority-class rate (reference) | {_format_metric(pubmedqa.get('majority_class_rate'))} |",
+            (
+                f"| Majority-class rate (reference) | "
+                f"{_format_metric(pubmedqa.get('majority_class_rate'))} |"
+            ),
             f"| Samples | {_format_metric(pubmedqa.get('num_samples'))} |",
             "",
         ]
@@ -148,7 +161,10 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
             "",
             "| Metric | Value |",
             "| --- | --- |",
-            f"| Medical MMLU accuracy (as reported) | {_format_metric(mmlu.get('overall_accuracy'))} |",
+            (
+                f"| Medical MMLU accuracy (as reported) | "
+                f"{_format_metric(mmlu.get('overall_accuracy'))} |"
+            ),
             f"| Subjects with samples | {', '.join(covered or evaluated_subjects) or 'none'} |",
             f"| Samples | {_format_metric(mmlu.get('total_samples'))} |",
             "",
@@ -180,7 +196,8 @@ def _dominant_label(
     return max(label_order, key=lambda label: prediction_counts.get(label, 0))
 
 
-def _usage_section(artifact: str, base_model_id: str) -> list[str]:
+def _usage_section(artifact: str, base_model_id: str, repo_id: str | None) -> list[str]:
+    target = repo_id or "<this-repo-id>"
     if artifact == "adapter":
         return [
             "## Usage",
@@ -201,7 +218,7 @@ def _usage_section(artifact: str, base_model_id: str) -> list[str]:
             "    torch_dtype=torch.bfloat16,",
             "    device_map=\"auto\",",
             ")",
-            "model = PeftModel.from_pretrained(base_model, \"<this-repo-id>\")",
+            f'model = PeftModel.from_pretrained(base_model, "{target}")',
             "model.eval()",
             "",
             "prompt = (",
@@ -211,11 +228,15 @@ def _usage_section(artifact: str, base_model_id: str) -> list[str]:
             "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
             "with torch.no_grad():",
             "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-            "print(tokenizer.decode(output[0][inputs[\"input_ids\"].shape[-1]:], skip_special_tokens=True))",
+            "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
+            "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
             "```",
             "",
             "The adapter config stores the base model as a Hub id, so the snippet above "
             "resolves the base without needing a local copy of the training files.",
+            "",
+            "Expect a degenerate answer: in the recorded run this produced one label for "
+            "every question. The snippet shows how to load the artifact, not that it works.",
             "",
         ]
 
@@ -229,9 +250,9 @@ def _usage_section(artifact: str, base_model_id: str) -> list[str]:
         "import torch",
         "from transformers import AutoModelForCausalLM, AutoTokenizer",
         "",
-        "tokenizer = AutoTokenizer.from_pretrained(\"<this-repo-id>\")",
+        f'tokenizer = AutoTokenizer.from_pretrained("{target}")',
         "model = AutoModelForCausalLM.from_pretrained(",
-        "    \"<this-repo-id>\",",
+        f'    "{target}",',
         "    torch_dtype=torch.bfloat16,",
         "    device_map=\"auto\",",
         ")",
@@ -244,8 +265,12 @@ def _usage_section(artifact: str, base_model_id: str) -> list[str]:
         "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
         "with torch.no_grad():",
         "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-        "print(tokenizer.decode(output[0][inputs[\"input_ids\"].shape[-1]:], skip_special_tokens=True))",
+        "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
+        "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
         "```",
+        "",
+        "Expect a degenerate answer: in the recorded run this produced one label for "
+        "every question. The snippet shows how to load the artifact, not that it works.",
         "",
     ]
 
@@ -256,6 +281,9 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
 
     report = _load_report(config)
     library_name = "peft" if artifact == "adapter" else "transformers"
+    repo_id = (
+        config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
+    )
     title = (
         f"{config.run_name} (LoRA+ adapter)"
         if artifact == "adapter"
@@ -312,7 +340,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         "",
     ]
 
-    lines.extend(_usage_section(artifact, config.base_model_id))
+    lines.extend(_usage_section(artifact, config.base_model_id, repo_id))
 
     lines.extend(
         [
@@ -338,16 +366,37 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
     if report is not None:
         training = report.get("training", {})
         training_metrics = training.get("train_metrics", {})
+        summary = report.get("training_summary", {})
+        rows = [
+            ("Train examples", _format_metric(report.get("train_examples"))),
+            ("Eval examples", _format_metric(report.get("eval_examples"))),
+            ("Global step", _format_metric(training.get("global_step"))),
+            (
+                "Train loss (final)",
+                _format_metric(training_metrics.get("train_loss")),
+            ),
+            (
+                "Best eval loss",
+                _format_metric(
+                    summary.get("best_eval_loss", training.get("best_eval_loss"))
+                ),
+            ),
+            (
+                "Latest eval loss",
+                _format_metric(summary.get("latest_eval_loss")),
+            ),
+            (
+                "Train runtime (s)",
+                _format_metric(summary.get("train_runtime")),
+            ),
+        ]
         lines.extend(
             [
                 "### Reported run details",
                 "",
                 "| Field | Value |",
                 "| --- | --- |",
-                f"| Train examples | {_format_metric(report.get('train_examples'))} |",
-                f"| Eval examples | {_format_metric(report.get('eval_examples'))} |",
-                f"| Global step | {_format_metric(training.get('global_step'))} |",
-                f"| Train loss (final) | {_format_metric(training_metrics.get('train_loss'))} |",
+                *[f"| {name} | {value} |" for name, value in rows],
                 "",
             ]
         )
@@ -369,11 +418,14 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             "",
             "- **The predictor collapsed.** All 100 held-out PubMedQA predictions were the "
             "same label, so the accuracy figure reflects the label distribution of the "
-            "test split, not the model's ability.",
+            "test split, not the model's ability. **The cause was not established**: the "
+            "evaluation was not re-run, and the scoring defects since fixed in the "
+            "evaluator are not shown to have produced it.",
             "- **The medical MMLU figure is one subject.** Only `anatomy` received samples; "
             "the other five medical subjects were allocated none.",
-            "- **The metrics were computed once** and copied to both this card and the "
-            "sibling card, so they do not describe this artifact separately.",
+            "- **The metrics were computed once** on the adapter run and copied to both "
+            "this card and the sibling card, so they do not describe this artifact "
+            "separately.",
             "- **Small evaluation.** 100 PubMedQA examples and a single MMLU subject are "
             "far too little to characterise a 7B model, and the 90/10 split comes from "
             "PubMedQA's `pqa_labeled` training pool rather than the official test set.",
