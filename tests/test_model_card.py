@@ -182,7 +182,7 @@ def test_merged_card_uses_transformers_usage_snippet(config):
     card = build_model_card(config, "merged")
 
     assert "library_name: transformers" in card
-    assert "merged full-precision weights" in card
+    assert "contains merged weights" in card
     assert "from peft import PeftModel" not in card
 
 

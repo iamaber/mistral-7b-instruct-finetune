@@ -243,8 +243,8 @@ def _usage_section(artifact: str, base_model_id: str, repo_id: str | None) -> li
     return [
         "## Usage",
         "",
-        "This repository contains merged full-precision weights, so the base model does "
-        "not need to be downloaded separately.",
+        "This repository contains merged weights, so the base model does not need to be "
+        "downloaded separately.",
         "",
         "```python",
         "import torch",
