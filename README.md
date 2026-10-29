@@ -136,9 +136,11 @@ The scoring, aggregation, prompt-budgeting and card-generation logic is covered
 by CPU-only unit tests that do not load a model:
 
 ```bash
-pip install -e ".[dev]"
-pytest
+uv run --extra dev pytest
 ```
+
+`pytest` alone also works inside a virtualenv that has the `dev` extra
+installed. The suite is stdlib + pytest only, so it runs on CPU in a second.
 
 ## Local Setup
 
