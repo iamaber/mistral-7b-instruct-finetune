@@ -184,3 +184,12 @@ python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapt
 python scripts/export_model.py --config configs/loraplus_train.json
 python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
 ```
+
+## License
+
+Copyright (c) 2025 iamaber
+
+This project is released under the Apache License 2.0; see [LICENSE](LICENSE)
+for the full terms. This matches the two published PubMedQA model cards and
+the Apache-2.0 Mistral base model. Third-party models and datasets retain
+their own terms.
