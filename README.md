@@ -4,8 +4,6 @@ This repository is a single-purpose LoRA+ fine-tuning workspace for `qiaojin/Pub
 
 The training path is explicitly non-quantized. The base model is loaded in full precision based on `model_dtype` from [`configs/loraplus_train.json`](configs/loraplus_train.json): `float32`, `float16`, `bfloat16`, or `auto`.
 
-**Project links:** [source](https://github.com/iamaber/mistral-7b-instruct-finetune) · [portfolio case study](https://iamaber.github.io/portfolio-website/#projects)
-
 ## Primary Modal Workflow
 
 1. Start a Modal notebook on one strong GPU such as `A100`, `H100`, or `L40S`.
