@@ -82,7 +82,6 @@ def load_base_model(config: LoRAPlusConfig) -> Any:
     model = AutoModelForCausalLM.from_pretrained(
         config.base_model_source,
         torch_dtype=resolve_model_dtype(config),
-        trust_remote_code=True,
     )
     model.config.use_cache = False
     return model
@@ -248,7 +247,6 @@ def load_model_for_artifact(
         model = AutoModelForCausalLM.from_pretrained(
             str(source_dir),
             torch_dtype=resolve_model_dtype(config),
-            trust_remote_code=True,
         )
     elif artifact == "adapter":
         source_dir = Path(model_path) if model_path is not None else config.adapter_output_dir
