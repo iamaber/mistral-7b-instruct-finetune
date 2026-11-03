@@ -6,7 +6,6 @@ peft>=0.9.0
 
 # Data processing and evaluation
 numpy>=1.24.0
-scikit-learn>=1.3.0
 tqdm>=4.65.0
 
 # Hugging Face integration
@@ -16,7 +15,3 @@ sentencepiece>=0.1.99
 
 # Experiment tracking
 wandb>=0.15.0
-
-# Optional acceleration backend
-# Install separately if you decide to build an Unsloth-specific training path.
-# unsloth
