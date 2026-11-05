@@ -38,7 +38,6 @@ def download_model(config: LoRAPlusConfig) -> None:
     snapshot_download(
         repo_id=config.base_model_id,
         local_dir=str(config.base_model_path),
-        local_dir_use_symlinks=False,
         token=os.getenv(config.hub_token_env) or None,
     )
     LOGGER.info("Saved base model to %s", config.base_model_path)
