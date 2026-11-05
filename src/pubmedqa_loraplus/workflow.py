@@ -32,6 +32,8 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def resolve_model_dtype(config: LoRAPlusConfig) -> torch.dtype:
@@ -126,6 +128,8 @@ def build_training_arguments(config: LoRAPlusConfig) -> TrainingArguments:
     run_name = config.wandb_run_name or config.run_name
     return TrainingArguments(
         output_dir=str(config.checkpoints_dir),
+        seed=config.seed,
+        data_seed=config.seed,
         per_device_train_batch_size=config.train_batch_size,
         per_device_eval_batch_size=config.eval_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
