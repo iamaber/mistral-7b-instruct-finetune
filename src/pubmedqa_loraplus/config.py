@@ -35,6 +35,7 @@ class LoRAPlusConfig:
     modal_image_name: str = "pubmedqa-loraplus"
     model_dtype: str = "auto"
     test_size: float = 0.1
+    validation_size: float = 0.1
     seed: int = 42
     max_length: int = 1024
     train_batch_size: int = 4

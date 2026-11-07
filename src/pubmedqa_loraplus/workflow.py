@@ -176,6 +176,7 @@ def _build_report(
         "dataset_config": config.dataset_config,
         "dataset_disk_path": str(config.dataset_disk_path),
         "train_examples": len(dataset["train"]),
+        "validation_examples": len(dataset["validation"]),
         "eval_examples": len(dataset["test"]),
         "training": {
             "learning_rate": config.learning_rate,
@@ -214,13 +215,14 @@ def train_model(config: LoRAPlusConfig) -> dict[str, Any]:
         model=model,
         args=build_training_arguments(config),
         train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["test"],
+        eval_dataset=tokenized_dataset["validation"],
         data_collator=CompletionOnlyCollator(tokenizer.pad_token_id),
     )
 
     LOGGER.info(
-        "Starting LoRA+ training: train=%s eval=%s base=%s",
+        "Starting LoRA+ training: train=%s validation=%s test=%s base=%s",
         len(dataset["train"]),
+        len(dataset["validation"]),
         len(dataset["test"]),
         config.base_model_id,
     )

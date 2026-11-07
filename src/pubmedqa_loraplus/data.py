@@ -99,7 +99,18 @@ def load_pubmedqa(config: LoRAPlusConfig) -> DatasetDict:
         source = load_dataset(config.dataset_id, config.dataset_config)
         train_split = source["train"]
 
-    return train_split.train_test_split(test_size=config.test_size, seed=config.seed)
+    holdout = train_split.train_test_split(test_size=config.test_size, seed=config.seed)
+    train_validation = holdout["train"].train_test_split(
+        test_size=config.validation_size,
+        seed=config.seed,
+    )
+    return DatasetDict(
+        {
+            "train": train_validation["train"],
+            "validation": train_validation["test"],
+            "test": holdout["test"],
+        }
+    )
 
 
 def tokenize_dataset(dataset: DatasetDict, tokenizer: Any, config: LoRAPlusConfig) -> DatasetDict:
