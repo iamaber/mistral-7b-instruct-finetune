@@ -105,6 +105,11 @@ def evaluate_pubmedqa(
     label_candidates = {
         label: build_answer_text(label, eos_token) for label in PUBMEDQA_LABELS
     }
+    max_candidate_tokens = max(
+        len(tokenizer(candidate, add_special_tokens=False)["input_ids"])
+        for candidate in label_candidates.values()
+    )
+    prompt_budget = max(config.max_length - max_candidate_tokens, 1)
 
     model.eval()
 
@@ -114,7 +119,7 @@ def evaluate_pubmedqa(
             tokenizer,
             example["question"],
             context,
-            config.max_length,
+            prompt_budget,
         )
         prediction, tied = _predict_from_candidates(
             model,
@@ -187,6 +192,12 @@ def evaluate_mmlu_medical(
     subject_results = {
         subject: {"correct": 0, "total": 0} for subject in MMLU_MEDICAL_TASKS
     }
+    mmlu_candidates = {choice: f" {choice}" for choice in MMLU_CHOICES}
+    max_candidate_tokens = max(
+        len(tokenizer(candidate, add_special_tokens=False)["input_ids"])
+        for candidate in mmlu_candidates.values()
+    )
+    prompt_budget = max(config.max_length - max_candidate_tokens, 1)
     model.eval()
 
     for row_index in tqdm(selected_rows, desc="Evaluating MMLU medical"):
@@ -197,12 +208,12 @@ def evaluate_mmlu_medical(
             prompt += f"{chr(65 + index)}. {choice}\n"
         prompt += "Answer:"
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        prompt_ids = prompt_ids[-config.max_length:]
+        prompt_ids = prompt_ids[-prompt_budget:]
         prediction, _ = _predict_from_candidates(
             model,
             tokenizer,
             prompt_ids,
-            {choice: f" {choice}" for choice in MMLU_CHOICES},
+            mmlu_candidates,
             order=MMLU_CHOICES,
         )
         predicted_index = ord(prediction) - ord("A")
