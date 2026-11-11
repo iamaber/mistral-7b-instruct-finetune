@@ -196,7 +196,141 @@ def _dominant_label(
     return max(label_order, key=lambda label: prediction_counts.get(label, 0))
 
 
-def _usage_section(artifact: str, base_model_id: str, repo_id: str | None) -> list[str]:
+def _pubmedqa_collapsed(report: dict[str, Any] | None) -> bool | None:
+    """Return the report's collapse verdict, or ``None`` when there is no report."""
+    if report is None:
+        return None
+    collapsed = report.get("evaluation", {}).get("pubmedqa", {}).get("collapsed")
+    return None if collapsed is None else bool(collapsed)
+
+
+def _mmlu_covered_subjects(report: dict[str, Any] | None) -> list[str]:
+    if report is None:
+        return []
+    mmlu = report.get("evaluation", {}).get("mmlu_medical", {})
+    covered = mmlu.get("covered_subjects")
+    if covered:
+        return list(covered)
+    return [
+        subject
+        for subject, result in mmlu.get("subject_results", {}).items()
+        if result.get("total", 0) > 0
+    ]
+
+
+def _collapse_expectation(collapsed: bool | None) -> list[str]:
+    if collapsed is True:
+        return [
+            "Expect a degenerate answer: in the recorded run this produced one label for "
+            "every question. The snippet shows how to load the artifact, not that it works.",
+        ]
+    if collapsed is False:
+        return [
+            "The evaluation recorded in this card did not collapse: the predictions span "
+            "more than one label. The snippet shows how to load the artifact, not that its "
+            "answers are clinically valid.",
+        ]
+    return [
+        "No evaluation report was available when this card was generated, so nothing is "
+        "claimed here about the quality of the output. The snippet shows how to load the "
+        "artifact, not that it works.",
+    ]
+
+
+def _limitations_section(report: dict[str, Any] | None) -> list[str]:
+    lines: list[str] = ["## Limitations", ""]
+
+    collapsed = _pubmedqa_collapsed(report)
+    if collapsed is True:
+        pubmedqa = (report or {}).get("evaluation", {}).get("pubmedqa", {})
+        samples = pubmedqa.get("num_samples")
+        label_order = pubmedqa.get("label_order") or ["yes", "no", "maybe"]
+        dominant = _dominant_label(pubmedqa.get("prediction_counts"), label_order)
+        scope = (
+            f"All {_format_metric(samples)} held-out PubMedQA predictions"
+            if samples is not None
+            else "Every held-out PubMedQA prediction"
+        )
+        lines.append(
+            f"- **The predictor collapsed.** {scope} were the same label (`{dominant}`), "
+            "so the accuracy figure reflects the label distribution of the test split, not "
+            "the model's ability. **The cause was not established**: the evaluation was not "
+            "re-run, and the scoring defects since fixed in the evaluator are not shown to "
+            "have produced it."
+        )
+    elif collapsed is False:
+        lines.append(
+            "- **No collapse in the recorded run, but no clinical validity either.** The "
+            "predictions span more than one label, so the accuracy is not just the "
+            "majority-class rate. The evaluation is still small and narrow (see below)."
+        )
+    else:
+        lines.append(
+            "- **No evaluation was recorded**, so this card makes no claim about prediction "
+            "quality in either direction."
+        )
+
+    covered = _mmlu_covered_subjects(report)
+    if len(covered) == 1:
+        lines.append(
+            f"- **The medical MMLU figure is one subject.** Only `{covered[0]}` received "
+            "samples; the other medical subjects were allocated none."
+        )
+    elif len(covered) > 1:
+        lines.append(
+            f"- **The medical MMLU figure covers {len(covered)} subjects** "
+            f"({', '.join(f'`{subject}`' for subject in covered)}); it is not the full "
+            "medical-MMLU set."
+        )
+
+    lines.append(
+        "- **The metrics were computed once** on the adapter run and copied to both this "
+        "card and the sibling card, so they do not describe this artifact separately."
+    )
+
+    if report is not None:
+        eval_examples = report.get("eval_examples")
+        validation_examples = report.get("validation_examples")
+        size = (
+            f"{_format_metric(eval_examples)} PubMedQA examples"
+            if eval_examples is not None
+            else "the PubMedQA holdout"
+        )
+        split_note = (
+            f" and {_format_metric(validation_examples)} validation examples"
+            if validation_examples is not None
+            else ""
+        )
+        lines.append(
+            f"- **Small evaluation.** The reported metrics rest on {size}{split_note}, far "
+            "too little to characterise a 7B model, and the holdout comes from PubMedQA's "
+            "`pqa_labeled` training pool rather than the official test set."
+        )
+    else:
+        lines.append(
+            "- **Small evaluation scale.** The pipeline holds out a fraction of "
+            "PubMedQA's `pqa_labeled` training pool, which is not the official test set and "
+            "is too little to characterise a 7B model."
+        )
+
+    lines.extend(
+        [
+            "- **English only**, and only on PubMed-style abstracts and multiple-choice "
+            "questions.",
+            "- **Training-data bias carries over** from the base model and from PubMedQA's "
+            "published-literature selection.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _usage_section(
+    artifact: str,
+    base_model_id: str,
+    repo_id: str | None,
+    collapsed: bool | None,
+) -> list[str]:
     target = repo_id or "<this-repo-id>"
     if artifact == "adapter":
         return [
@@ -235,8 +369,7 @@ def _usage_section(artifact: str, base_model_id: str, repo_id: str | None) -> li
             "The adapter config stores the base model as a Hub id, so the snippet above "
             "resolves the base without needing a local copy of the training files.",
             "",
-            "Expect a degenerate answer: in the recorded run this produced one label for "
-            "every question. The snippet shows how to load the artifact, not that it works.",
+            *_collapse_expectation(collapsed),
             "",
         ]
 
@@ -269,8 +402,7 @@ def _usage_section(artifact: str, base_model_id: str, repo_id: str | None) -> li
         "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
         "```",
         "",
-        "Expect a degenerate answer: in the recorded run this produced one label for "
-        "every question. The snippet shows how to load the artifact, not that it works.",
+        *_collapse_expectation(collapsed),
         "",
     ]
 
@@ -311,10 +443,10 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         "",
         f"# {title}",
         "",
-        "> **This is an experiment, not a usable medical model.** The evaluation in this "
-        "card shows a collapsed classifier that answers one label for every question. "
-        "Do not use it for clinical decision-making, diagnosis, triage, or any other "
-        "medical purpose.",
+        "> **This is an experiment, not a usable medical model.** It is a small LoRA+ "
+        "research run on PubMedQA. Do not use it for clinical decision-making, "
+        "diagnosis, triage, or any other medical purpose. Read the evaluation and "
+        "limitations sections before drawing any conclusion.",
         "",
         "## What this is",
         "",
@@ -326,10 +458,11 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         "",
         "## Intended use",
         "",
-        "- Inspecting what a small LoRA+ run on 900 PubMedQA examples does to a 7B "
+        "- Inspecting what a small LoRA+ run on PubMedQA's labeled pool does to a 7B "
         "instruction-tuned model.",
-        "- Reproducing the evaluation and extending it: the interesting finding is the "
-        "collapse, and the evaluation code now reports that collapse explicitly.",
+        "- Reproducing the evaluation and extending it: whatever the run produced is "
+        "recorded in the evaluation section, including an explicitly flagged collapse if "
+        "the predictions were degenerate.",
         "",
         "## Out-of-scope use",
         "",
@@ -340,7 +473,9 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         "",
     ]
 
-    lines.extend(_usage_section(artifact, config.base_model_id, repo_id))
+    lines.extend(
+        _usage_section(artifact, config.base_model_id, repo_id, _pubmedqa_collapsed(report))
+    )
 
     lines.extend(
         [
@@ -409,31 +544,16 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             "## Training data",
             "",
             "`qiaojin/PubMedQA` (`pqa_labeled`), 1,000 expert-annotated biomedical "
-            "research questions with yes/no/maybe decisions. The pipeline splits it 90/10, "
-            "so the reported evaluation uses 100 held-out examples. PubMedQA is released "
-            "under the MIT licence; its abstracts are derived from PubMed and remain "
-            "subject to the original publishers' terms.",
+            "research questions with yes/no/maybe decisions. The pipeline holds out a test "
+            "split and a separate validation split used for checkpoint selection. PubMedQA "
+            "is released under the MIT licence; its abstracts are derived from PubMed and "
+            "remain subject to the original publishers' terms.",
             "",
-            "## Limitations",
-            "",
-            "- **The predictor collapsed.** All 100 held-out PubMedQA predictions were the "
-            "same label, so the accuracy figure reflects the label distribution of the "
-            "test split, not the model's ability. **The cause was not established**: the "
-            "evaluation was not re-run, and the scoring defects since fixed in the "
-            "evaluator are not shown to have produced it.",
-            "- **The medical MMLU figure is one subject.** Only `anatomy` received samples; "
-            "the other five medical subjects were allocated none.",
-            "- **The metrics were computed once** on the adapter run and copied to both "
-            "this card and the sibling card, so they do not describe this artifact "
-            "separately.",
-            "- **Small evaluation.** 100 PubMedQA examples and a single MMLU subject are "
-            "far too little to characterise a 7B model, and the 90/10 split comes from "
-            "PubMedQA's `pqa_labeled` training pool rather than the official test set.",
-            "- **English only**, and only on PubMed-style abstracts and multiple-choice "
-            "questions.",
-            "- **Training-data bias carries over** from the base model and from PubMedQA's "
-            "published-literature selection.",
-            "",
+        ]
+    )
+    lines.extend(_limitations_section(report))
+    lines.extend(
+        [
             "## Licence",
             "",
             f"- This adapter/model is released under **Apache-2.0**, matching the "

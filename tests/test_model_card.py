@@ -97,7 +97,7 @@ def test_card_declares_experiment_status(config, artifact):
 def test_card_states_the_predictor_collapsed(config, artifact):
     card = build_model_card(config, artifact)
 
-    assert "collapsed predictor" in card
+    assert "The predictor collapsed" in card
     assert "All 100 held-out PubMedQA predictions were the same label" in card
     assert "majority class" in card
 
@@ -237,3 +237,152 @@ def test_card_without_report_reports_no_metrics(tmp_path):
     assert "No evaluation report was found" in card
     assert "does not borrow metrics from another run" in card
     assert "Accuracy |" not in card
+
+
+HEALTHY_REPORT = {
+    "run_name": "pubmedqa-loraplus",
+    "base_model_id": BASE_MODEL_ID,
+    "dataset_id": "qiaojin/PubMedQA",
+    "dataset_config": "pqa_labeled",
+    "train_examples": 810,
+    "validation_examples": 90,
+    "eval_examples": 100,
+    "training": {"global_step": 171, "train_metrics": {"train_loss": 0.41}},
+    "training_summary": {
+        "best_eval_loss": 0.44,
+        "latest_eval_loss": 0.45,
+        "train_runtime": 500.0,
+    },
+    "evaluation": {
+        "pubmedqa": {
+            "accuracy": 0.62,
+            "macro_f1": 0.58,
+            "weighted_f1": 0.61,
+            "majority_class_rate": 0.45,
+            "collapsed": False,
+            "label_order": ["yes", "no", "maybe"],
+            "confusion_matrix": [[30, 10, 5], [5, 30, 5], [2, 3, 10]],
+            "reference_counts": {"yes": 45, "no": 40, "maybe": 15},
+            "prediction_counts": {"yes": 37, "no": 43, "maybe": 20},
+            "num_samples": 100,
+            "warnings": [],
+        },
+        "mmlu_medical": {
+            "overall_accuracy": 0.41,
+            "covered_subjects": [
+                "anatomy",
+                "clinical_knowledge",
+                "college_medicine",
+                "medical_genetics",
+                "professional_medicine",
+                "virology",
+            ],
+            "subject_results": {
+                "anatomy": {"correct": 4, "total": 9},
+                "clinical_knowledge": {"correct": 3, "total": 9},
+                "college_medicine": {"correct": 3, "total": 8},
+                "medical_genetics": {"correct": 4, "total": 8},
+                "professional_medicine": {"correct": 3, "total": 8},
+                "virology": {"correct": 4, "total": 8},
+            },
+            "total_samples": 50,
+        },
+    },
+}
+
+
+@pytest.fixture
+def healthy_config(tmp_path):
+    reports_root = tmp_path / "reports"
+    reports_root.mkdir(exist_ok=True)
+    (reports_root / "pubmedqa-loraplus.json").write_text(
+        json.dumps(HEALTHY_REPORT),
+        encoding="utf-8",
+    )
+    return LoRAPlusConfig(
+        run_name="pubmedqa-loraplus",
+        base_model_id=BASE_MODEL_ID,
+        base_model_path=tmp_path / "base_model",
+        dataset_id="qiaojin/PubMedQA",
+        dataset_config="pqa_labeled",
+        dataset_disk_path=tmp_path / "dataset",
+        output_root=tmp_path / "out",
+        reports_root=reports_root,
+    )
+
+
+@pytest.mark.parametrize("artifact", ["adapter", "merged"])
+def test_healthy_run_card_does_not_claim_a_collapse(healthy_config, artifact):
+    """The Limitations block must be derived from the report, not boilerplate.
+
+    A non-collapsed, multi-subject run must not inherit the published run's
+    "all predictions were the same label" or "only anatomy received samples"
+    text.
+    """
+    card = build_model_card(healthy_config, artifact)
+
+    assert "The predictor collapsed" not in card
+    assert "same label" not in card
+    assert "All 100 held-out PubMedQA predictions" not in card
+    assert "one subject" not in card
+    assert "Only `anatomy` received samples" not in card
+    assert "No collapse in the recorded run" in card
+    assert "covers 6 subjects" in card
+
+
+@pytest.mark.parametrize("artifact", ["adapter", "merged"])
+def test_healthy_run_card_keeps_the_real_numbers(healthy_config, artifact):
+    card = build_model_card(healthy_config, artifact)
+
+    assert "0.6200" in card
+    assert "0.4100" in card
+    assert "| 30 | 10 | 5 |" in card
+
+
+@pytest.mark.parametrize("artifact", ["adapter", "merged"])
+def test_card_without_a_report_claims_no_collapse(tmp_path, artifact):
+    config = LoRAPlusConfig(
+        run_name="missing-run",
+        base_model_id=BASE_MODEL_ID,
+        base_model_path=tmp_path / "base_model",
+        dataset_id="qiaojin/PubMedQA",
+        dataset_config="pqa_labeled",
+        dataset_disk_path=tmp_path / "dataset",
+        output_root=tmp_path / "out",
+        reports_root=tmp_path / "reports",
+    )
+
+    card = build_model_card(config, artifact)
+
+    assert "The predictor collapsed" not in card
+    assert "No evaluation was recorded" in card
+    assert "one subject" not in card
+    assert "No evaluation report was available" in card
+
+
+def test_report_limitations_reference_their_own_sample_count(tmp_path):
+    """Card text must quote the report's sample count, not a hardcoded 100."""
+    report = json.loads(json.dumps(HEALTHY_REPORT))
+    report["evaluation"]["pubmedqa"]["collapsed"] = True
+    report["evaluation"]["pubmedqa"]["num_samples"] = 250
+    reports_root = tmp_path / "reports"
+    reports_root.mkdir(exist_ok=True)
+    (reports_root / "pubmedqa-loraplus.json").write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+    config = LoRAPlusConfig(
+        run_name="pubmedqa-loraplus",
+        base_model_id=BASE_MODEL_ID,
+        base_model_path=tmp_path / "base_model",
+        dataset_id="qiaojin/PubMedQA",
+        dataset_config="pqa_labeled",
+        dataset_disk_path=tmp_path / "dataset",
+        output_root=tmp_path / "out",
+        reports_root=reports_root,
+    )
+
+    card = build_model_card(config, "adapter")
+
+    assert "All 250 held-out PubMedQA predictions" in card
+    assert "All 100 held-out PubMedQA predictions" not in card
