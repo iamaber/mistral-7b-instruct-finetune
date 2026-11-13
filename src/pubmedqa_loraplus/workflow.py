@@ -15,6 +15,7 @@ from .artifact import prepare_adapter_for_publish
 from .config import LoRAPlusConfig
 from .data import CompletionOnlyCollator, load_pubmedqa, tokenize_dataset
 from .evaluation import run_evaluation_suite
+from .report import build_run_report
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -160,6 +161,27 @@ def build_training_arguments(config: LoRAPlusConfig) -> TrainingArguments:
     )
 
 
+def _latest_logged_metric(log_history: list[dict[str, Any]], key: str) -> float | None:
+    for entry in reversed(log_history):
+        if key in entry:
+            return float(entry[key])
+    return None
+
+
+def build_training_summary(trainer: Trainer, train_result: Any) -> dict[str, Any]:
+    best_metric = trainer.state.best_metric
+    metrics = dict(train_result.metrics)
+    return {
+        "best_eval_loss": float(best_metric) if best_metric is not None else None,
+        "latest_train_loss": _latest_logged_metric(trainer.state.log_history, "loss"),
+        "latest_eval_loss": _latest_logged_metric(
+            trainer.state.log_history, "eval_loss"
+        ),
+        "train_runtime": metrics.get("train_runtime"),
+        "train_loss": metrics.get("train_loss"),
+    }
+
+
 def _build_report(
     config: LoRAPlusConfig,
     dataset: Any,
@@ -167,18 +189,17 @@ def _build_report(
     train_result: Any,
     evaluation: dict[str, Any],
 ) -> dict[str, Any]:
-    train_metrics = dict(train_result.metrics)
-    return {
-        "run_name": config.run_name,
-        "base_model_id": config.base_model_id,
-        "base_model_source": config.base_model_source,
-        "dataset_id": config.dataset_id,
-        "dataset_config": config.dataset_config,
-        "dataset_disk_path": str(config.dataset_disk_path),
-        "train_examples": len(dataset["train"]),
-        "validation_examples": len(dataset["validation"]),
-        "eval_examples": len(dataset["test"]),
-        "training": {
+    return build_run_report(
+        run_name=config.run_name,
+        base_model_id=config.base_model_id,
+        base_model_source=config.base_model_source,
+        dataset_id=config.dataset_id,
+        dataset_config=config.dataset_config,
+        dataset_disk_path=str(config.dataset_disk_path),
+        train_examples=len(dataset["train"]),
+        validation_examples=len(dataset["validation"]),
+        eval_examples=len(dataset["test"]),
+        training={
             "learning_rate": config.learning_rate,
             "loraplus_lr_ratio": config.loraplus_lr_ratio,
             "num_epochs": config.num_epochs,
@@ -186,9 +207,10 @@ def _build_report(
             "gradient_accumulation_steps": config.gradient_accumulation_steps,
             "best_model_checkpoint": trainer.state.best_model_checkpoint,
             "global_step": trainer.state.global_step,
-            "train_metrics": train_metrics,
+            "train_metrics": dict(train_result.metrics),
         },
-        "artifacts": {
+        training_summary=build_training_summary(trainer, train_result),
+        artifacts={
             "checkpoints": str(config.checkpoints_dir),
             "adapter": str(config.adapter_output_dir),
             "tokenizer": str(config.tokenizer_output_dir),
@@ -197,8 +219,8 @@ def _build_report(
             "config_snapshot": str(config.config_snapshot_path),
             "training_log": str(config.training_log_path),
         },
-        "evaluation": evaluation,
-    }
+        evaluation=evaluation,
+    )
 
 
 def train_model(config: LoRAPlusConfig) -> dict[str, Any]:
@@ -276,12 +298,23 @@ def evaluate_artifact(
     model, tokenizer = load_model_for_artifact(config, artifact, model_path=model_path)
     evaluation = run_evaluation_suite(model, tokenizer, dataset["test"], config)
     output_path = config.reports_root / f"{config.run_name}_{artifact}_eval.json"
-    payload = {
-        "run_name": config.run_name,
-        "artifact": artifact,
-        "model_path": str(model_path) if model_path is not None else None,
-        "evaluation": evaluation,
-    }
+    payload = build_run_report(
+        run_name=config.run_name,
+        base_model_id=config.base_model_id,
+        base_model_source=config.base_model_source,
+        dataset_id=config.dataset_id,
+        dataset_config=config.dataset_config,
+        dataset_disk_path=str(config.dataset_disk_path),
+        train_examples=None,
+        validation_examples=len(dataset["validation"]),
+        eval_examples=len(dataset["test"]),
+        training={
+            "artifact": artifact,
+            "model_path": str(model_path) if model_path is not None else None,
+        },
+        training_summary={},
+        evaluation=evaluation,
+    )
     _write_json(output_path, payload)
     payload["report_path"] = str(output_path)
     return payload
