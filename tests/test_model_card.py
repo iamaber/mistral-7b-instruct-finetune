@@ -25,6 +25,11 @@ PUBLISHED_REPORT = {
         "global_step": 171,
         "train_metrics": {"train_loss": 0.4810},
     },
+    "training_summary": {
+        "best_eval_loss": 0.5188,
+        "latest_eval_loss": 0.5188,
+        "train_runtime": 566.5676,
+    },
     "evaluation": {
         "pubmedqa": {
             "accuracy": 0.45,
@@ -55,10 +60,9 @@ PUBLISHED_REPORT = {
 }
 
 
-@pytest.fixture
-def config(tmp_path):
+def _config(tmp_path, **overrides):
     reports_root = tmp_path / "reports"
-    reports_root.mkdir()
+    reports_root.mkdir(exist_ok=True)
     (reports_root / "pubmedqa-loraplus.json").write_text(
         json.dumps(PUBLISHED_REPORT),
         encoding="utf-8",
@@ -72,7 +76,13 @@ def config(tmp_path):
         dataset_disk_path=tmp_path / "dataset",
         output_root=tmp_path / "out",
         reports_root=reports_root,
+        **overrides,
     )
+
+
+@pytest.fixture
+def config(tmp_path):
+    return _config(tmp_path)
 
 
 @pytest.mark.parametrize("artifact", ["adapter", "merged"])
@@ -117,6 +127,40 @@ def test_card_keeps_published_numbers(config, artifact):
     assert "0.2793" in card
     assert "0.1600" in card
     assert "| 45 | 0 | 0 |" in card
+    assert "0.5188" in card
+    assert "0.4810" in card
+    assert "566.5676" in card
+
+
+@pytest.mark.parametrize("artifact", ["adapter", "merged"])
+def test_card_does_not_claim_a_cause_that_was_not_established(config, artifact):
+    card = build_model_card(config, artifact)
+
+    assert "The cause was not established" in card
+
+
+def test_adapter_card_names_its_own_repo_in_the_snippet(tmp_path):
+    config = _config(tmp_path, adapter_hub_repo_id="owner/some-adapter")
+
+    card = build_model_card(config, "adapter")
+
+    assert 'PeftModel.from_pretrained(base_model, "owner/some-adapter")' in card
+    assert "<this-repo-id>" not in card
+
+
+def test_merged_card_names_its_own_repo_in_the_snippet(tmp_path):
+    config = _config(tmp_path, merged_hub_repo_id="owner/some-merged")
+
+    card = build_model_card(config, "merged")
+
+    assert 'AutoModelForCausalLM.from_pretrained(\n    "owner/some-merged",' in card
+    assert "<this-repo-id>" not in card
+
+
+def test_card_falls_back_to_a_placeholder_without_a_repo_id(config):
+    card = build_model_card(config, "adapter")
+
+    assert "<this-repo-id>" in card
 
 
 @pytest.mark.parametrize("artifact", ["adapter", "merged"])
@@ -173,7 +217,7 @@ def test_card_declares_base_model_in_frontmatter(config, artifact):
     card = build_model_card(config, artifact)
 
     assert f"base_model: {BASE_MODEL_ID}" in card
-    assert f"  - qiaojin/PubMedQA" in card
+    assert "  - qiaojin/PubMedQA" in card
 
 
 def test_card_without_report_reports_no_metrics(tmp_path):
