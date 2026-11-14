@@ -85,6 +85,61 @@ The project trains with masked-answer supervision:
 - only answer tokens contribute to the loss
 - PubMedQA task metrics and a medical MMLU slice are reported for each run
 
+## Evaluation Notes
+
+The published artifacts from this project came from a single evaluation run that
+was not fit to publish. Three things must be read carefully:
+
+- **PubMedQA collapsed.** Every one of the 100 predictions was `yes`, so the
+  reported accuracy of 0.4500 equals the majority-class rate of that split
+  (45 `yes` / 40 `no` / 15 `maybe`), and macro F1 (0.2069) is what an all-`yes`
+  predictor scores. The cause of the collapse is **not established**: it was
+  not reproduced here (no model was loaded) and it cannot be attributed to the
+  scoring defects fixed below. The evaluator now reports the predicted-label
+  distribution, the majority-class baseline and a `collapsed` flag, so a
+  degenerate predictor is visible instead of being published as a score.
+- **The medical MMLU figure covered one subject.** The sample budget took the
+  first 50 rows of a subject-filtered `cais/mmlu` split. Those rows are all
+  `anatomy` (measured against the current dataset revision), which is why the
+  other five medical subjects show 0 samples. The budget is now spread across
+  the requested subjects and zero-sample subjects are recorded in the report.
+- **The metrics were computed once and copied to both cards.** They describe
+  the adapter run, not each repository separately.
+
+The card generator in [`hub.py`](src/pubmedqa_loraplus/hub.py) renders these
+warnings into the model card, so a future run cannot publish a collapsed
+predictor or a single-subject MMLU figure without saying so.
+
+### Defects fixed in the scoring path
+
+These are real defects in `src/pubmedqa_loraplus/evaluation.py`, fixed with
+CPU-only tests. None of them is shown to have produced the published numbers:
+
+- **Causal offset.** `_score_candidate` indexed logits from `prompt_length`,
+  but a causal LM's logits at position `i` predict token `i + 1`. The position
+  that predicts the first answer token was therefore never read. The Modal
+  notebook, which produced the published run, already used
+  `prompt_length - 1`, so this bug lived only in the `src/` path.
+- **Candidate length normalisation.** Summed log-probabilities favour shorter
+  candidates. All published PubMedQA candidates (`" yes</s>"`, `" no</s>"`,
+  `" maybe</s>"`) are two tokens, so there was no length bias to exploit in
+  that run; averaging is applied anyway because the tokenizer decides this.
+- **Prompt budgeting.** The joined prompt used to be sliced from the left,
+  which can remove `Question: ... [/INST]`. On the published split the longest
+  of 100 prompts was 688 tokens against a 1024 budget, so the slice never
+  truncated; the head/context/tail split keeps the suffix for longer inputs.
+
+
+## Tests
+
+The scoring, aggregation, prompt-budgeting and card-generation logic is covered
+by CPU-only unit tests that do not load a model:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
 ## Local Setup
 
 ```bash
