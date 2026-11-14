@@ -4,8 +4,7 @@ import torch
 from datasets import DatasetDict, load_dataset, load_from_disk
 
 from .config import LoRAPlusConfig
-from .prompts import build_answer_text, build_instruction_prompt
-from .prompts import build_prompt_parts, fit_prompt_ids
+from .prompts import build_answer_text, build_prompt_parts, fit_prompt_ids
 
 
 def flatten_context(context: object) -> str:
@@ -26,9 +25,9 @@ def encode_prompt(
 
     Tokenizing the head, context and tail separately lets the context be
     trimmed while the ``Question: ... [/INST]`` suffix survives. Slicing the
-    joined prompt from the left used to remove the question and the ``[/INST]``
-    marker for long PubMedQA abstracts, which is exactly the part the model
-    was trained to answer after.
+    joined prompt from the left would remove the question and the ``[/INST]``
+    marker once an abstract is long enough, which is exactly the part the
+    model was trained to answer after.
     """
     head, body, tail = build_prompt_parts(question, context, tokenizer.bos_token or "<s>")
     head_ids = tokenizer(head, add_special_tokens=False)["input_ids"]
@@ -38,17 +37,6 @@ def encode_prompt(
         context_ids = []
     tail_ids = tokenizer(tail, add_special_tokens=False)["input_ids"]
     return fit_prompt_ids(head_ids, context_ids, tail_ids, budget)
-
-
-def build_prompt_answer_pair(
-    example: dict[str, Any],
-    bos_token: str,
-    eos_token: str,
-) -> tuple[str, str]:
-    context = flatten_context(example["context"])
-    prompt = build_instruction_prompt(example["question"], context, bos_token)
-    answer = build_answer_text(example["final_decision"], eos_token)
-    return prompt, answer
 
 
 def tokenize_example(

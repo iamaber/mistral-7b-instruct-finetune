@@ -51,6 +51,12 @@ def fit_prompt_ids(
     The head and the tail (``Question: ... [/INST]``) are always kept. Context
     tokens are dropped from the left because the end of a PubMedQA abstract —
     the conclusion — is the part that answers the question.
+
+    The published run never hit this path: the longest of 100 real
+    ``pqa_labeled`` prompts tokenized to 688 tokens against a 1024 budget, so
+    left-truncating the joined prompt would not have removed the question. The
+    guard matters for longer abstracts and smaller ``max_length`` values, so it
+    is still used for both training and evaluation.
     """
     if budget < 1:
         raise ValueError("budget must be >= 1")
