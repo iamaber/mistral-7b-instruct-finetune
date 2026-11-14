@@ -4,6 +4,8 @@ import torch
 from datasets import DatasetDict, load_dataset, load_from_disk
 
 from .config import LoRAPlusConfig
+from .prompts import build_answer_text, build_instruction_prompt
+from .prompts import build_prompt_parts, fit_prompt_ids
 
 
 def flatten_context(context: object) -> str:
@@ -14,12 +16,28 @@ def flatten_context(context: object) -> str:
     return str(context)
 
 
-def build_instruction_prompt(question: str, context: str, bos_token: str = "<s>") -> str:
-    return f"{bos_token}[INST] Context: {context}\n\nQuestion: {question} [/INST]"
+def encode_prompt(
+    tokenizer: Any,
+    question: str,
+    context: str,
+    budget: int,
+) -> list[int]:
+    """Tokenize an instruction prompt into at most ``budget`` tokens.
 
-
-def build_answer_text(answer: str, eos_token: str = "</s>") -> str:
-    return f" {answer.lower()}{eos_token}"
+    Tokenizing the head, context and tail separately lets the context be
+    trimmed while the ``Question: ... [/INST]`` suffix survives. Slicing the
+    joined prompt from the left used to remove the question and the ``[/INST]``
+    marker for long PubMedQA abstracts, which is exactly the part the model
+    was trained to answer after.
+    """
+    head, body, tail = build_prompt_parts(question, context, tokenizer.bos_token or "<s>")
+    head_ids = tokenizer(head, add_special_tokens=False)["input_ids"]
+    if body:
+        context_ids = tokenizer(body, add_special_tokens=False)["input_ids"]
+    else:
+        context_ids = []
+    tail_ids = tokenizer(tail, add_special_tokens=False)["input_ids"]
+    return fit_prompt_ids(head_ids, context_ids, tail_ids, budget)
 
 
 def build_prompt_answer_pair(
@@ -38,15 +56,18 @@ def tokenize_example(
     tokenizer: Any,
     config: LoRAPlusConfig,
 ) -> dict[str, list[int]]:
-    prompt, answer = build_prompt_answer_pair(
-        example,
-        tokenizer.bos_token or "<s>",
+    answer = build_answer_text(
+        example["final_decision"],
         tokenizer.eos_token or "</s>",
     )
-    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
     max_prompt_tokens = max(config.max_length - len(answer_ids), 1)
-    prompt_ids = prompt_ids[:max_prompt_tokens]
+    prompt_ids = encode_prompt(
+        tokenizer,
+        example["question"],
+        flatten_context(example["context"]),
+        max_prompt_tokens,
+    )
     input_ids = (prompt_ids + answer_ids)[: config.max_length]
     attention_mask = [1] * len(input_ids)
     labels = ([-100] * len(prompt_ids) + answer_ids)[: config.max_length]
