@@ -15,6 +15,7 @@ from src.pubmedqa_loraplus.scoring import (
     majority_class_rate,
     prediction_counts,
     reference_counts,
+    select_subject_rows,
     subject_sample_plan,
     weighted_f1,
 )
@@ -137,3 +138,65 @@ def test_subject_sample_plan_validates_inputs():
         subject_sample_plan({}, 0, ("anatomy",))
     with pytest.raises(ValueError):
         subject_sample_plan({}, 5, ())
+
+
+def test_first_rows_of_filtered_mmlu_split_are_anatomy_only():
+    """Reproduce the published selection: first 50 rows of the filtered split.
+
+    ``cais/mmlu`` stores the test split in subject blocks, so a filtered slice
+    starts with 135 ``anatomy`` rows. Taking the first 50 therefore samples one
+    subject and reports it as "medical MMLU" — the defect seen on the cards.
+    The real row order was measured against the current dataset revision:
+    anatomy 135, clinical_knowledge 265, college_medicine 173,
+    medical_genetics 100, professional_medicine 272, virology 166.
+    """
+    row_order = ["anatomy"] * 135 + ["clinical_knowledge"] * 265
+    published_selection = row_order[:50]
+
+    assert set(published_selection) == {"anatomy"}
+
+
+def test_first_rows_of_filtered_split_have_the_published_reference_counts():
+    """The split the published run used is 45 yes / 40 no / 15 maybe.
+
+    ``pqa_labeled.train_test_split(test_size=0.1, seed=42)`` produces exactly
+    these counts, which is what the published confusion matrix sums to.
+    """
+    references = ["yes"] * 45 + ["no"] * 40 + ["maybe"] * 15
+
+    assert reference_counts(references) == {"yes": 45, "no": 40, "maybe": 15}
+    assert majority_class_rate(references) == pytest.approx(0.45)
+
+
+def test_select_subject_rows_spreads_across_every_subject():
+    subjects = (
+        "anatomy",
+        "clinical_knowledge",
+        "college_medicine",
+        "medical_genetics",
+        "professional_medicine",
+        "virology",
+    )
+    # Subject-blocked order, as in the real split.
+    row_subjects = [subject for subject in subjects for _ in range(10)]
+    plan = subject_sample_plan({subject: 10 for subject in subjects}, 50, subjects)
+
+    selected = select_subject_rows(row_subjects, plan)
+
+    chosen = [row_subjects[index] for index in selected]
+    assert len(selected) == 50
+    assert set(chosen) == set(subjects)
+    assert selected == sorted(selected)
+
+
+def test_select_subject_rows_returns_rows_in_original_order():
+    row_subjects = ["virology", "anatomy", "virology", "anatomy", "anatomy"]
+    plan = {"anatomy": 2, "virology": 1}
+
+    assert select_subject_rows(row_subjects, plan) == [0, 1, 3]
+
+
+def test_select_subject_rows_skips_unplanned_subjects():
+    row_subjects = ["virology", "virology"]
+
+    assert select_subject_rows(row_subjects, {"anatomy": 1}) == []

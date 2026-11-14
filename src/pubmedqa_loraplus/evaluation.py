@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from .config import LoRAPlusConfig
 from .data import encode_prompt, flatten_context
-from .prompts import build_answer_text, build_instruction_prompt
+from .prompts import build_answer_text
 from .scoring import (
     PUBMEDQA_LABELS,
     accuracy,
@@ -19,6 +19,7 @@ from .scoring import (
     prediction_counts,
     reference_counts,
     score_candidate,
+    select_subject_rows,
     subject_sample_plan,
     weighted_f1,
 )
@@ -181,12 +182,7 @@ def evaluate_mmlu_medical(
         config.mmlu_eval_samples,
         MMLU_MEDICAL_TASKS,
     )
-    remaining = dict(plan)
-    selected_rows: list[int] = []
-    for row_index, subject in enumerate(medical_data["subject"]):
-        if remaining.get(subject, 0) > 0:
-            selected_rows.append(row_index)
-            remaining[subject] -= 1
+    selected_rows = select_subject_rows(list(medical_data["subject"]), plan)
 
     subject_results = {
         subject: {"correct": 0, "total": 0} for subject in MMLU_MEDICAL_TASKS
