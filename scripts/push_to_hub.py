@@ -29,14 +29,26 @@ def main() -> None:
         default=None,
         help="Optional explicit source directory instead of the config default.",
     )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help=(
+            "Make the Hub repo public. Publishing is private unless this flag is "
+            "given: the artifact is an experimental, collapsed model."
+        ),
+    )
     args = parser.parse_args()
 
     load_env_file()
+    config = LoRAPlusConfig.from_file(args.config)
+    if args.public:
+        config.hub_private = False
     result = push_artifact_to_hub(
-        LoRAPlusConfig.from_file(args.config),
+        config,
         artifact=args.artifact,
         source_dir=args.source_dir,
     )
+    result["private"] = str(config.hub_private)
     print(json.dumps(result, indent=2))
 
 

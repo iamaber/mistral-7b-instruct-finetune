@@ -27,12 +27,10 @@ class LoRAPlusConfig:
     dataset_disk_path: Path
     output_root: Path
     reports_root: Path
-    modal_volume_name: str = "pubmedqa-loraplus"
+    # The notebook mounts the volume and reads this as its default root; the
+    # GPU, timeout, secret and image are properties of the Modal app, not of a
+    # training run, so they are not part of the config.
     modal_mount_root: str = "/vol/pubmedqa-loraplus"
-    modal_gpu: str = "A100"
-    modal_timeout_minutes: int = 1440
-    modal_secret_name: str = "pubmedqa-loraplus-secrets"
-    modal_image_name: str = "pubmedqa-loraplus"
     model_dtype: str = "auto"
     test_size: float = 0.1
     validation_size: float = 0.1
@@ -66,7 +64,7 @@ class LoRAPlusConfig:
     wandb_run_name: str | None = None
     adapter_hub_repo_id: str | None = None
     merged_hub_repo_id: str | None = None
-    hub_private: bool = False
+    hub_private: bool = True
     hub_token_env: str = "HF_TOKEN"
     resume_from_checkpoint: str | None = None
 
@@ -88,9 +86,6 @@ class LoRAPlusConfig:
             raise ValueError(
                 f"model_dtype must be one of {sorted(VALID_MODEL_DTYPES)}"
             )
-        if self.modal_timeout_minutes <= 0:
-            raise ValueError("modal_timeout_minutes must be > 0")
-
         if self.resume_from_checkpoint is not None:
             self.resume_from_checkpoint = str(resolve_repo_path(self.resume_from_checkpoint))
 

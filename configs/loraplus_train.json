@@ -7,12 +7,7 @@
   "dataset_disk_path": "data/pubmedqa",
   "output_root": "models/pubmedqa-loraplus",
   "reports_root": "reports",
-  "modal_volume_name": "pubmedqa-loraplus",
   "modal_mount_root": "/vol/pubmedqa-loraplus",
-  "modal_gpu": "A100",
-  "modal_timeout_minutes": 1440,
-  "modal_secret_name": "pubmedqa-loraplus-secrets",
-  "modal_image_name": "pubmedqa-loraplus",
   "model_dtype": "auto",
   "test_size": 0.1,
   "validation_size": 0.1,
@@ -51,7 +46,7 @@
   "wandb_run_name": "pubmedqa-loraplus",
   "adapter_hub_repo_id": null,
   "merged_hub_repo_id": null,
-  "hub_private": false,
+  "hub_private": true,
   "hub_token_env": "HF_TOKEN",
   "resume_from_checkpoint": null
 }

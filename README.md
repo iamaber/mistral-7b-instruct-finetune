@@ -12,11 +12,15 @@ The training path is explicitly non-quantized. The base model is loaded in full 
 4. Upload and run [`notebooks/pubmedqa_loraplus_notebook.ipynb`](notebooks/pubmedqa_loraplus_notebook.ipynb).
 
 The notebook:
+- installs the pinned versions from `requirements.lock.txt` (exported from `uv.lock`)
 - downloads or reuses the cached dataset and base model from the Modal Volume
-- trains the LoRA+ adapter directly in the notebook
+- trains the LoRA+ adapter directly in the notebook, selecting the checkpoint on
+  a validation split that is disjoint from the reported test split
 - evaluates PubMedQA and medical MMLU
 - exports adapter and merged model artifacts
-- optionally pushes artifacts to Hugging Face
+- optionally pushes artifacts to Hugging Face, but only when
+  `ADAPTER_HUB_REPO_ID` / `MERGED_HUB_REPO_ID` are set; the repos are created
+  private unless `hub_private` is set to `false`
 
 ## Volume Layout
 
@@ -31,39 +35,70 @@ This keeps the persistent training state easy to inspect and resume.
 
 ## Repository Layout
 
+Tracked files (`git ls-files`):
+
 ```text
 .
 ├── configs/
 │   └── loraplus_train.json
-├── data/
-│   └── pubmedqa/                       # Local fallback dataset cache
-├── models/
-│   ├── base_model/                     # Local fallback base model cache
-│   └── pubmedqa-loraplus/              # Local fallback run outputs
 ├── notebooks/
 │   └── pubmedqa_loraplus_notebook.ipynb
-├── reports/                            # Generated reports, gitignored
-├── scripts/                            # Secondary helpers
+├── scripts/
+│   ├── bootstrap.sh
+│   ├── evaluate.py
+│   ├── export_model.py
+│   ├── prepare_assets.py
+│   ├── push_to_hub.py
+│   └── train.py
 ├── src/
 │   └── pubmedqa_loraplus/
+│       ├── __init__.py
+│       ├── artifact.py
+│       ├── config.py
+│       ├── data.py
+│       ├── env.py
+│       ├── evaluation.py
+│       ├── hub.py
+│       ├── paths.py
+│       ├── prompts.py
+│       ├── report.py
+│       ├── scoring.py
+│       └── workflow.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_aggregation.py
+│   ├── test_artifact.py
+│   ├── test_data.py
+│   ├── test_model_card.py
+│   ├── test_prompts.py
+│   ├── test_report.py
+│   ├── test_scoring.py
+│   └── test_splits.py
 ├── .env.example
+├── .gitignore
+├── .python-version
+├── LICENSE
 ├── README.md
 ├── pyproject.toml
-└── requirements.txt
+├── requirements.lock.txt
+├── requirements.txt
+└── uv.lock
 ```
+
+Generated at runtime and gitignored: `data/` (dataset cache), `models/`
+(base model and run output) and `reports/` (run reports).
 
 ## Shared Config
 
 [`configs/loraplus_train.json`](configs/loraplus_train.json) remains the shared default config. The Modal notebook reads it for default hyperparameters, then rewrites runtime paths to the mounted Modal Volume.
 
-Modal-specific fields in the config:
+The only Modal-specific field in the config is `modal_mount_root`: the
+notebook reads it as the default mount point for the volume. GPU type,
+timeout, secret name and image name belong to the Modal app definition that
+launches the notebook, so they are not part of the training config.
 
-- `modal_volume_name`
-- `modal_mount_root`
-- `modal_gpu`
-- `modal_timeout_minutes`
-- `modal_secret_name`
-- `modal_image_name`
+Publishing is **private by default** (`hub_private: true`). Making a Hub repo
+public is an explicit choice: pass `--public` to `scripts/push_to_hub.py`.
 
 Common environment overrides the notebook accepts:
 
@@ -89,6 +124,19 @@ The project trains with masked-answer supervision:
 
 The published artifacts from this project came from a single evaluation run that
 was not fit to publish. Three things must be read carefully:
+
+### Fixed: selection no longer uses the reported split
+
+The published run selected its checkpoint with `load_best_model_at_end` on
+`eval_loss` and then reported PubMedQA on those same 100 examples, so model
+selection leaked into the headline number. `load_pubmedqa` now returns three
+disjoint splits — `train`, `validation` (used for checkpoint selection) and
+`test` (used only for the reported metrics) — configured by `validation_size`.
+`tests/test_splits.py` pins that the splits are pairwise disjoint and cover every
+example exactly once. A future run that reports `test` metrics is no longer
+choosing its checkpoint on the same examples.
+
+The caveats below describe the already-published run, which predates that split.
 
 - **PubMedQA collapsed.** Every one of the 100 predictions was `yes`, so the
   reported accuracy of 0.4500 equals the majority-class rate of that split
@@ -150,16 +198,14 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-Environment variables live in `.env`:
+For a reproducible environment that matches `uv.lock`, use
+`uv sync --extra dev` (or install the pinned export,
+`pip install -r requirements.lock.txt`).
 
-```dotenv
-HF_TOKEN=
-WANDB_API_KEY=
-WANDB_PROJECT=pubmedqa-loraplus
-WANDB_ENTITY=
-WANDB_MODE=offline
-BASE_MODEL_ID=
-PUBMEDQA_MODAL_ROOT=/vol/pubmedqa-loraplus
+Environment variables live in `.env`; copy the tracked template first:
+
+```bash
+cp .env.example .env
 ```
 
 ## Notebook
@@ -184,6 +230,10 @@ python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapt
 python scripts/export_model.py --config configs/loraplus_train.json
 python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
 ```
+
+`push_to_hub.py` creates the Hub repo **private** unless you pass `--public`.
+The adapter and merged model directories must exist locally (the notebook
+writes them under the Modal Volume's `runs/<run_name>/`).
 
 ## License
 
