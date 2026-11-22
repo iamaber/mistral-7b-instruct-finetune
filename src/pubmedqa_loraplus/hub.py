@@ -440,12 +440,15 @@ def _limitations_section(report: dict[str, Any] | None) -> list[str]:
     return lines
 
 
-def _generation_lines(target_format: str, max_new_tokens: int) -> list[str]:
+def _generation_lines(
+    target_format: str, max_new_tokens: int, template_kwargs: dict[str, Any]
+) -> list[str]:
     user_text = build_user_message("<question>", "<abstract text>", target_format)
+    extra = "".join(f", {key}={value!r}" for key, value in template_kwargs.items())
     return [
         f'messages = [{{"role": "user", "content": {user_text!r}}}]',
         "inputs = tokenizer.apply_chat_template(",
-        '    messages, add_generation_prompt=True, return_tensors="pt", return_dict=True',
+        f'    messages, add_generation_prompt=True, return_tensors="pt", return_dict=True{extra}',
         ").to(model.device)",
         "with torch.no_grad():",
         f"    output = model.generate(**inputs, max_new_tokens={max_new_tokens}, do_sample=False)",
@@ -464,7 +467,9 @@ def _usage_section(
     max_new_tokens = 8
     if config.target_format == "rationale":
         max_new_tokens = config.rationale_max_new_tokens + 8
-    generation = _generation_lines(config.target_format, max_new_tokens)
+    generation = _generation_lines(
+        config.target_format, max_new_tokens, dict(config.chat_template_kwargs)
+    )
     answer_note = (
         "The model writes a short conclusion and ends with `Answer: yes|no|maybe`."
         if config.target_format == "rationale"
@@ -681,10 +686,9 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         [
             "## Licence",
             "",
-            f"- This adapter/model is released under **Apache-2.0**, matching the "
-            f"`{config.base_model_id}` base model, which is itself Apache-2.0.",
-            "- Using or redistributing the base model is subject to the Mistral AI "
-            "licence terms that accompany it, not to this repository alone.",
+            "- This adapter/model is released under **Apache-2.0**.",
+            f"- Using or redistributing the base model `{config.base_model_id}` is subject "
+            "to the licence that accompanies it, not to this repository alone.",
             "- PubMedQA is MIT-licensed; see its dataset card for the abstract provenance terms.",
             "",
             "## Citation",
