@@ -81,16 +81,38 @@ def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
     ]
     if baseline.get("collapsed"):
         lines.extend(["> The base model's predictions were also a single label.", ""])
-    base_mmlu = evaluation.get("baseline", {}).get("mmlu_medical", {}).get("overall_accuracy")
-    tuned_mmlu = evaluation.get("mmlu_medical", {}).get("overall_accuracy")
-    if base_mmlu is not None and tuned_mmlu is not None:
+    base_mmlu = evaluation.get("baseline", {}).get("mmlu_medical", {})
+    tuned_mmlu = evaluation.get("mmlu_medical", {})
+    if "answer_line_accuracy" in base_mmlu and "answer_line_accuracy" in tuned_mmlu:
         lines.extend(
             [
-                f"Medical MMLU: base model {_format_metric(base_mmlu)}, fine-tune "
-                f"{_format_metric(tuned_mmlu)}. MMLU is scored by the probability of the "
-                "option letter as the first reply token. A fine-tune that learned to open "
-                "with a written conclusion can lose that score from the format change "
-                "alone, so read a drop here as unresolved, not as proven forgetting.",
+                "| Medical MMLU | Base model | Fine-tune |",
+                "| --- | --- | --- |",
+                "| Letter as first reply token | "
+                f"{_format_metric(base_mmlu.get('overall_accuracy'))} | "
+                f"{_format_metric(tuned_mmlu.get('overall_accuracy'))} |",
+                "| Letter after a short rationale | "
+                f"{_format_metric(base_mmlu['answer_line_accuracy'])} | "
+                f"{_format_metric(tuned_mmlu['answer_line_accuracy'])} |",
+                "",
+                "The first row penalises a model that learned to open with a written "
+                "conclusion; the second scores the letter after its own reasoning, so a drop "
+                "there is the better forgetting signal.",
+                "",
+            ]
+        )
+    elif (
+        base_mmlu.get("overall_accuracy") is not None
+        and tuned_mmlu.get("overall_accuracy") is not None
+    ):
+        lines.extend(
+            [
+                f"Medical MMLU: base model {_format_metric(base_mmlu['overall_accuracy'])}, "
+                f"fine-tune {_format_metric(tuned_mmlu['overall_accuracy'])}. MMLU is scored "
+                "by the probability of the option letter as the first reply token. A fine-tune "
+                "that learned to open with a written conclusion can lose that score from the "
+                "format change alone, so read a drop here as unresolved, not as proven "
+                "forgetting.",
                 "",
             ]
         )

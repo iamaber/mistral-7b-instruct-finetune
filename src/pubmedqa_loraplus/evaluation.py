@@ -6,7 +6,15 @@ from tqdm import tqdm
 
 from .config import LoRAPlusConfig
 from .data import encode_prompt
-from .prompts import ANSWER_LINE, ANSWER_MARKER, ChatFormat, choice_token_ids, extract_rationale
+from .prompts import (
+    ANSWER_LINE,
+    ANSWER_MARKER,
+    MMLU_ANSWER_LINE_INSTRUCTION,
+    MMLU_FIRST_TOKEN_INSTRUCTION,
+    ChatFormat,
+    choice_token_ids,
+    extract_rationale,
+)
 from .scoring import (
     PUBMEDQA_LABELS,
     accuracy,
@@ -241,11 +249,27 @@ def evaluate_pubmedqa(
     return summarise_pubmedqa(predictions, samples, config.seed), predictions
 
 
+def _score_mmlu_batch(
+    model: Any,
+    sequences: list[list[int]],
+    choices: list[dict[str, int]],
+    pad_id: int,
+) -> list[str]:
+    log_probs = _next_token_log_probs(model, sequences, pad_id)
+    predictions = []
+    for row, choice_ids in enumerate(choices):
+        scores = {choice: float(log_probs[row, token]) for choice, token in choice_ids.items()}
+        prediction, _ = choose_label(scores, order=MMLU_CHOICES)
+        predictions.append(prediction)
+    return predictions
+
+
 def evaluate_mmlu_medical(
     model: Any,
     tokenizer: Any,
     config: LoRAPlusConfig,
 ) -> dict[str, Any]:
+    """Score the same medical questions at the reply start and after a rationale."""
     mmlu_dataset = load_dataset(
         config.mmlu_dataset_id,
         config.mmlu_dataset_config,
@@ -262,32 +286,70 @@ def evaluate_mmlu_medical(
     plan = subject_sample_plan(subject_totals, config.mmlu_eval_samples, MMLU_MEDICAL_TASKS)
     selected_rows = select_subject_rows(list(medical_data["subject"]), plan)
 
-    subject_results = {subject: {"correct": 0, "total": 0} for subject in MMLU_MEDICAL_TASKS}
+    subject_results = {
+        subject: {"correct": 0, "total": 0, "answer_line": 0} for subject in MMLU_MEDICAL_TASKS
+    }
+    answer_line_unmarked = 0
     chat_format = ChatFormat.from_tokenizer(tokenizer, config.chat_template_kwargs)
     lead_ids, choice_ids = choice_token_ids(tokenizer, chat_format.completion_prefix, MMLU_CHOICES)
     model.eval()
 
-    for row_index in tqdm(selected_rows, desc="Evaluating MMLU medical"):
-        example = medical_data[row_index]
-        options = "\n".join(
-            f"{letter}. {choice}" for letter, choice in zip(MMLU_CHOICES, example["choices"])
+    batch_size = max(1, config.eval_batch_size)
+    for start in tqdm(range(0, len(selected_rows), batch_size), desc="Evaluating MMLU medical"):
+        examples = [medical_data[index] for index in selected_rows[start : start + batch_size]]
+        first_token_sequences = []
+        rationale_prompts = []
+        for example in examples:
+            options = "\n".join(
+                f"{letter}. {choice}" for letter, choice in zip(MMLU_CHOICES, example["choices"])
+            )
+            question = (
+                "The following is a multiple choice question about medical knowledge.\n\n"
+                f"{example['question']}\n{options}\n\n"
+            )
+            first_token_prompt = chat_format.render_prompt(
+                tokenizer, question + MMLU_FIRST_TOKEN_INSTRUCTION
+            )
+            first_token_ids = tokenizer(first_token_prompt, add_special_tokens=False)["input_ids"]
+            first_token_sequences.append(first_token_ids + lead_ids)
+            rationale_prompt = chat_format.render_prompt(
+                tokenizer, question + MMLU_ANSWER_LINE_INSTRUCTION
+            )
+            rationale_ids = tokenizer(rationale_prompt, add_special_tokens=False)["input_ids"]
+            rationale_prompts.append(rationale_ids)
+
+        first_token_predictions = _score_mmlu_batch(
+            model, first_token_sequences, [choice_ids] * len(examples), tokenizer.pad_token_id
         )
-        user_text = (
-            "The following is a multiple choice question about medical knowledge.\n\n"
-            f"{example['question']}\n{options}\n\n"
-            "Answer with the letter of the correct option only."
+        generated = _generate_batch(
+            model, tokenizer, rationale_prompts, config.rationale_max_new_tokens
         )
-        prompt = chat_format.render_prompt(tokenizer, user_text)
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        log_probs = _next_token_log_probs(model, [prompt_ids + lead_ids], tokenizer.pad_token_id)
-        scores = {choice: float(log_probs[0, token]) for choice, token in choice_ids.items()}
-        prediction, _ = choose_label(scores, order=MMLU_CHOICES)
-        subject = example["subject"]
-        subject_results[subject]["total"] += 1
-        if MMLU_CHOICES.index(prediction) == example["answer"]:
-            subject_results[subject]["correct"] += 1
+        answer_line_sequences = []
+        answer_line_choices = []
+        for prompt_ids, text in zip(rationale_prompts, generated):
+            answer_line_unmarked += ANSWER_LINE not in text
+            rationale = extract_rationale(text)
+            lead_text = f"{chat_format.completion_prefix}{rationale}{ANSWER_LINE} "
+            rationale_lead_ids, rationale_choice_ids = choice_token_ids(
+                tokenizer, lead_text, MMLU_CHOICES
+            )
+            answer_line_sequences.append(prompt_ids + rationale_lead_ids)
+            answer_line_choices.append(rationale_choice_ids)
+        answer_line_predictions = _score_mmlu_batch(
+            model, answer_line_sequences, answer_line_choices, tokenizer.pad_token_id
+        )
+
+        for example, first_token, answer_line in zip(
+            examples, first_token_predictions, answer_line_predictions
+        ):
+            result = subject_results[example["subject"]]
+            gold = MMLU_CHOICES[example["answer"]]
+            result["total"] += 1
+            result["correct"] += first_token == gold
+            result["answer_line"] += answer_line == gold
 
     total_correct = sum(result["correct"] for result in subject_results.values())
+    answer_line_correct = sum(result["answer_line"] for result in subject_results.values())
     total_samples = sum(result["total"] for result in subject_results.values())
     subject_accuracies = {
         subject: (result["correct"] / result["total"] if result["total"] else None)
@@ -313,6 +375,8 @@ def evaluate_mmlu_medical(
 
     return {
         "overall_accuracy": (total_correct / total_samples if total_samples else 0.0),
+        "answer_line_accuracy": (answer_line_correct / total_samples if total_samples else 0.0),
+        "answer_line_unmarked": answer_line_unmarked,
         "subject_accuracies": subject_accuracies,
         "subject_results": subject_results,
         "sample_plan": plan,

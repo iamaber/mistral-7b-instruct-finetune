@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from .paths import resolve_repo_path
-from .prompts import TARGET_FORMATS, build_user_message
+from .prompts import (
+    MMLU_ANSWER_LINE_INSTRUCTION,
+    MMLU_FIRST_TOKEN_INSTRUCTION,
+    TARGET_FORMATS,
+    build_user_message,
+)
 
 VALID_MODEL_DTYPES = {"auto", "float32", "float16", "bfloat16"}
 
@@ -213,6 +218,7 @@ def baseline_cache_key(config: LoRAPlusConfig) -> str:
         "model_dtype": config.model_dtype,
         "target_format": config.target_format,
         "user_message": build_user_message("{question}", "{context}", config.target_format),
+        "mmlu_prompts": [MMLU_FIRST_TOKEN_INSTRUCTION, MMLU_ANSWER_LINE_INSTRUCTION],
         "chat_template_kwargs": config.chat_template_kwargs,
         "max_length": config.max_length,
         "rationale_max_new_tokens": config.rationale_max_new_tokens,

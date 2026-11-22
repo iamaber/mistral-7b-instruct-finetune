@@ -25,6 +25,11 @@ _INSTRUCTIONS: dict[str, str] = {
         f"or '{ANSWER_MARKER} maybe'."
     ),
 }
+MMLU_FIRST_TOKEN_INSTRUCTION = "Answer with the letter of the correct option only."
+MMLU_ANSWER_LINE_INSTRUCTION = (
+    "Reason briefly, then give the letter of the correct option on its own line "
+    f"in the format '{ANSWER_MARKER} <letter>'."
+)
 
 _SENTINEL = "\x00PUBMEDQA_ASSISTANT\x00"
 
