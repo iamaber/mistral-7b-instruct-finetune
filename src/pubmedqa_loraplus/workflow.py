@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+import peft
 import torch
+import transformers
 from datasets import Dataset
 from peft import LoraConfig, PeftModel, get_peft_model
 from peft.optimizers import create_loraplus_optimizer
@@ -414,7 +416,9 @@ def cached_baseline(
     The baseline ignores training hyperparameters, so sweep variants and reruns
     share one evaluation instead of re-scoring the base model every time.
     """
-    path = config.reports_root / "baselines" / f"{baseline_cache_key(config)}.json"
+    # Library upgrades change kernels and tokenization, so the versions are part of the key.
+    versions = f"transformers-{transformers.__version__}_peft-{peft.__version__}"
+    path = config.reports_root / "baselines" / versions / f"{baseline_cache_key(config)}.json"
     if path.exists():
         payload = json.loads(path.read_text(encoding="utf-8"))
         LOGGER.info("Reusing cached base-model baseline %s", path)
