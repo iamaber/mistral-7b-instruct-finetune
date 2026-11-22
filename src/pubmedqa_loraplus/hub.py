@@ -96,8 +96,8 @@ def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
                 f"{_format_metric(tuned_mmlu['answer_line_accuracy'])} |",
                 "",
                 "The first row penalises a model that learned to open with a written "
-                "conclusion; the second scores the letter after its own reasoning, so a drop "
-                "there is the better forgetting signal.",
+                "conclusion; the second lets it reason first. A drop in both rows means the "
+                "fine-tune lost medical knowledge, not only its answer format.",
                 "",
             ]
         )

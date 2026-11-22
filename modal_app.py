@@ -239,7 +239,21 @@ def push(overrides_json: str, seed_runs: list[str]) -> dict:
                 for stat, fn in (("mean", statistics.mean), ("sd", statistics.stdev))
             },
         }
-        config.report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    # A later standalone re-evaluation (evaluate --artifact base/adapter) may hold the
+    # two-way MMLU score the training run predates; the card should show the newer one.
+    evals = {
+        artifact: config.reports_root / f"{config.run_name}_{artifact}_eval.json"
+        for artifact in ("base", "adapter")
+    }
+    if all(path.exists() for path in evals.values()):
+        mmlu = {
+            artifact: json.loads(path.read_text(encoding="utf-8"))["evaluation"]["mmlu_medical"]
+            for artifact, path in evals.items()
+        }
+        if all("answer_line_accuracy" in result for result in mmlu.values()):
+            report["evaluation"]["mmlu_medical"] = mmlu["adapter"]
+            report["evaluation"].setdefault("baseline", {})["mmlu_medical"] = mmlu["base"]
+    config.report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     result = push_artifact_to_hub(config, "adapter")
     volume.commit()
     return {**result, "card": build_model_card(config, "adapter")}
