@@ -144,3 +144,10 @@ def test_default_schedule_evaluates_several_times(tmp_path):
     steps = planned_optimizer_steps(config, train_examples=744)
 
     assert steps // config.eval_steps >= 5
+
+
+def test_saving_less_often_than_evaluating_is_rejected(tmp_path):
+    config = _config(tmp_path, eval_steps=20, save_steps=40)
+
+    with pytest.raises(ValueError, match="save_steps must equal eval_steps"):
+        planned_optimizer_steps(config, train_examples=744)

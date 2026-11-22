@@ -13,6 +13,9 @@ from typing import Any, Literal, Mapping, Sequence
 TargetFormat = Literal["label", "rationale"]
 TARGET_FORMATS: tuple[str, ...] = ("label", "rationale")
 ANSWER_MARKER = "Answer:"
+# The trained completion puts the marker at the start of a line; matching that
+# form keeps a quoted "Answer:" inside the conclusion from ending generation.
+ANSWER_LINE = f"\n{ANSWER_MARKER}"
 
 _INSTRUCTIONS: dict[str, str] = {
     "label": "Answer the question with exactly one word: yes, no, or maybe.",
@@ -48,7 +51,7 @@ def build_completion_content(decision: str, long_answer: str | None, target_form
 
 def extract_rationale(generated: str) -> str:
     """Text the model wrote before its ``Answer:`` line (all of it if absent)."""
-    return generated.split(ANSWER_MARKER, 1)[0].strip()
+    return generated.split(ANSWER_LINE, 1)[0].strip()
 
 
 @dataclass(frozen=True)

@@ -174,6 +174,8 @@ def load_pubmedqa(config: LoRAPlusConfig) -> DatasetDict:
     pubids = labeled["pubid"]
     decisions = labeled["final_decision"]
 
+    if len(set(pubids)) != len(pubids):
+        raise ValueError("Dataset contains duplicate PMIDs")
     test_rows = [index for index, pubid in enumerate(pubids) if pubid in truth]
     if len(test_rows) != len(truth):
         raise ValueError(

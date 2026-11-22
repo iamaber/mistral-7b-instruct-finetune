@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from .config import LoRAPlusConfig
 from .data import encode_prompt
-from .prompts import ANSWER_MARKER, ChatFormat, choice_token_ids, extract_rationale
+from .prompts import ANSWER_LINE, ANSWER_MARKER, ChatFormat, choice_token_ids, extract_rationale
 from .scoring import (
     PUBMEDQA_LABELS,
     accuracy,
@@ -80,7 +80,7 @@ def _generate_batch(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             use_cache=True,
-            stop_strings=[ANSWER_MARKER],
+            stop_strings=[ANSWER_LINE],
             tokenizer=tokenizer,
             pad_token_id=pad_id,
         )

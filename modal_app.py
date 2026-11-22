@@ -82,11 +82,15 @@ def _build_config(overrides_json: str) -> "LoRAPlusConfig":
     run_name = overrides.get("run_name", defaults["run_name"])
     if model_id != defaults["base_model_id"]:
         overrides.setdefault("base_model_revision", None)
+    merged = {**defaults, **overrides}
+    # Cache keys carry the revision so a warm volume never serves a different pin.
+    model_key = f"{model_id.replace('/', '--')}@{merged['base_model_revision'] or 'main'}"
+    dataset_key = f"{merged['dataset_config']}@{merged['dataset_revision'] or 'main'}"
     return LoRAPlusConfig(
         **{
             **defaults,
-            "base_model_path": VOLUME_ROOT / "base_models" / model_id.replace("/", "--"),
-            "dataset_disk_path": VOLUME_ROOT / "dataset",
+            "base_model_path": VOLUME_ROOT / "base_models" / model_key,
+            "dataset_disk_path": VOLUME_ROOT / "datasets" / dataset_key,
             "output_root": VOLUME_ROOT / "runs" / run_name,
             "reports_root": VOLUME_ROOT / "reports",
             "modal_mount_root": str(VOLUME_ROOT),
@@ -216,7 +220,8 @@ def main(
         raise ValueError("action must be one of tests, train, evaluate, smoke")
 
     report = result.pop("report")
-    report_path = LOCAL_REPO / "reports" / "modal" / f"{result['run_name']}.json"
+    stem = result["run_name"] if action != "evaluate" else f"{result['run_name']}_{artifact}_eval"
+    report_path = LOCAL_REPO / "reports" / "modal" / f"{stem}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))

@@ -73,12 +73,9 @@ def _wandb_report_targets(config: LoRAPlusConfig) -> list[str]:
 
 
 def load_tokenizer(config: LoRAPlusConfig) -> Any:
-    if config.tokenizer_output_dir.exists():
-        tokenizer = AutoTokenizer.from_pretrained(str(config.tokenizer_output_dir))
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.base_model_source, revision=_hub_revision(config)
-        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.base_model_source, revision=_hub_revision(config)
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -253,7 +250,12 @@ def compare_to_baseline(
     references = [record["gold"] for record in predictions]
     tuned = [record["prediction"] for record in predictions]
     base = [record["prediction"] for record in baseline_predictions]
-    samples = max(config.bootstrap_samples, 1)
+    if config.bootstrap_samples < 1:
+        return {
+            name: {"delta": metric(references, tuned) - metric(references, base)}
+            for name, metric in (("accuracy", accuracy), ("macro_f1", macro_f1_score))
+        }
+    samples = config.bootstrap_samples
     return {
         name: paired_bootstrap_delta(references, tuned, base, metric, samples, config.seed)
         for name, metric in (("accuracy", accuracy), ("macro_f1", macro_f1_score))

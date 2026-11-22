@@ -190,6 +190,7 @@ def planned_optimizer_steps(
             f"Training runs {steps} optimizer steps but eval_steps={config.eval_steps}: "
             "checkpoint selection would never evaluate. Lower eval_steps/save_steps."
         )
-    if config.save_steps % config.eval_steps:
-        raise ValueError("save_steps must be a multiple of eval_steps for best-model selection")
+    if config.save_steps != config.eval_steps:
+        # A best evaluation at an unsaved step leaves load_best_model_at_end nothing to load.
+        raise ValueError("save_steps must equal eval_steps for best-model selection")
     return steps
