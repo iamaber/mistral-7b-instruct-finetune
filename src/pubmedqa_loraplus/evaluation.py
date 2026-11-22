@@ -5,20 +5,21 @@ from datasets import Dataset, load_dataset
 from tqdm import tqdm
 
 from .config import LoRAPlusConfig
-from .data import encode_prompt, flatten_context
-from .prompts import build_answer_text
+from .data import encode_prompt
+from .prompts import ANSWER_MARKER, ChatFormat, choice_token_ids, extract_rationale
 from .scoring import (
     PUBMEDQA_LABELS,
     accuracy,
+    bootstrap_interval,
     choose_label,
     confusion_matrix_counts,
     is_collapsed,
     macro_f1,
+    macro_f1_score,
     majority_class_rate,
-    normalise_candidate_scores,
+    max_prediction_share,
     prediction_counts,
     reference_counts,
-    score_candidate,
     select_subject_rows,
     subject_sample_plan,
     weighted_f1,
@@ -33,110 +34,134 @@ MMLU_MEDICAL_TASKS = (
     "professional_medicine",
     "virology",
 )
+_ANSWER_RESERVE = 16
 
 
 def _model_device(model: Any) -> torch.device:
     return next(model.parameters()).device
 
 
-def _score_candidate(
+def _choice_log_probs(
+    model: Any,
+    input_ids: list[int],
+    choice_ids: dict[str, int],
+) -> dict[str, float]:
+    """Log-probability of each choice's decision token at the next position."""
+    tensor = torch.tensor([input_ids], dtype=torch.long, device=_model_device(model))
+    with torch.no_grad():
+        logits = model(input_ids=tensor, attention_mask=torch.ones_like(tensor)).logits
+    log_probs = torch.log_softmax(logits[0, -1].float(), dim=-1)
+    return {choice: float(log_probs[token_id]) for choice, token_id in choice_ids.items()}
+
+
+def _generate_batch(
     model: Any,
     tokenizer: Any,
-    prompt_ids: list[int],
-    candidate: str,
-) -> tuple[float, int]:
-    """Return ``(summed log-prob, candidate token count)`` for one candidate."""
-    candidate_ids = tokenizer(candidate, add_special_tokens=False)["input_ids"]
-    if not candidate_ids:
-        raise ValueError("candidate produced no tokens; cannot score it")
-
+    prompts: list[list[int]],
+    max_new_tokens: int,
+) -> list[str]:
+    """Greedy continuations of left-padded prompts, stopping at ``Answer:``."""
+    pad_id = tokenizer.pad_token_id
+    width = max(len(ids) for ids in prompts)
     input_ids = torch.tensor(
-        [prompt_ids + candidate_ids],
+        [[pad_id] * (width - len(ids)) + ids for ids in prompts],
         dtype=torch.long,
         device=_model_device(model),
     )
-    attention_mask = torch.ones_like(input_ids)
-
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-
-    log_probs = torch.log_softmax(outputs.logits[0], dim=-1)
-
-    def log_prob_at(position: int, token_id: int) -> float:
-        return float(log_probs[position, token_id].item())
-
-    return score_candidate(len(prompt_ids), candidate_ids, log_prob_at), len(candidate_ids)
-
-
-def _predict_from_candidates(
-    model: Any,
-    tokenizer: Any,
-    prompt_ids: list[int],
-    candidates: dict[str, str],
-    order: tuple[str, ...] | list[str],
-) -> tuple[str, bool]:
-    if not candidates:
-        raise ValueError("No candidate labels provided for prediction")
-
-    raw_scores: dict[str, float] = {}
-    token_counts: dict[str, int] = {}
-    for label, candidate in candidates.items():
-        raw_scores[label], token_counts[label] = _score_candidate(
-            model,
-            tokenizer,
-            prompt_ids,
-            candidate,
-        )
-
-    scores = normalise_candidate_scores(raw_scores, token_counts)
-    return choose_label(scores, order=list(order))
-
-
-def evaluate_pubmedqa(
-    model: Any,
-    tokenizer: Any,
-    dataset: Dataset,
-    config: LoRAPlusConfig,
-) -> dict[str, Any]:
-    predictions: list[str] = []
-    references: list[str] = []
-    tied_predictions = 0
-    eos_token = tokenizer.eos_token or "</s>"
-    label_candidates = {
-        label: build_answer_text(label, eos_token) for label in PUBMEDQA_LABELS
-    }
-    max_candidate_tokens = max(
-        len(tokenizer(candidate, add_special_tokens=False)["input_ids"])
-        for candidate in label_candidates.values()
+    attention_mask = torch.tensor(
+        [[0] * (width - len(ids)) + [1] * len(ids) for ids in prompts],
+        dtype=torch.long,
+        device=input_ids.device,
     )
-    prompt_budget = max(config.max_length - max_candidate_tokens, 1)
+    with torch.no_grad():
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+            stop_strings=[ANSWER_MARKER],
+            tokenizer=tokenizer,
+            pad_token_id=pad_id,
+        )
+    return tokenizer.batch_decode(output[:, width:], skip_special_tokens=True)
 
-    model.eval()
 
-    for example in tqdm(dataset, desc="Evaluating PubMedQA"):
-        context = flatten_context(example["context"])
-        prompt_ids = encode_prompt(
-            tokenizer,
+class PubMedQAPredictor:
+    """Turns one normalised PubMedQA example into a label decision.
+
+    ``label`` runs scores the decision token right after the assistant prefix.
+    ``rationale`` runs first generate the conclusion, then score the decision
+    token after ``Answer:``, so a prediction always exists even when the model
+    never writes the marker.
+    """
+
+    def __init__(self, model: Any, tokenizer: Any, config: LoRAPlusConfig):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.config = config
+        self.chat_format = ChatFormat.from_tokenizer(tokenizer, config.chat_template_kwargs)
+        reserve = _ANSWER_RESERVE
+        if config.target_format == "rationale":
+            reserve += config.rationale_max_new_tokens
+        self.prompt_budget = config.max_length - reserve
+        if self.prompt_budget < 1:
+            raise ValueError("max_length is too small for the answer reserve")
+
+    def _prompt_ids(self, example: dict[str, Any]) -> list[int]:
+        return encode_prompt(
+            self.tokenizer,
+            self.chat_format,
             example["question"],
-            context,
-            prompt_budget,
+            example["context"],
+            self.config.target_format,
+            self.prompt_budget,
         )
-        prediction, tied = _predict_from_candidates(
-            model,
-            tokenizer,
-            prompt_ids,
-            label_candidates,
-            order=PUBMEDQA_LABELS,
-        )
-        tied_predictions += int(tied)
-        predictions.append(prediction)
-        references.append(example["final_decision"].lower())
 
-    matrix = confusion_matrix_counts(references, predictions, PUBMEDQA_LABELS)
-    reference_distribution = reference_counts(references)
-    prediction_distribution = prediction_counts(predictions)
-    collapsed = is_collapsed(predictions)
-    baseline = majority_class_rate(references)
+    def _lead_text(self, rationale: str | None) -> str:
+        if rationale is None:
+            return self.chat_format.completion_prefix
+        return f"{self.chat_format.completion_prefix}{rationale}\n{ANSWER_MARKER} "
+
+    def predict_batch(self, examples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prompts = [self._prompt_ids(example) for example in examples]
+        rationales: list[str | None] = [None] * len(examples)
+        if self.config.target_format == "rationale":
+            generated = _generate_batch(
+                self.model, self.tokenizer, prompts, self.config.rationale_max_new_tokens
+            )
+            rationales = [extract_rationale(text) for text in generated]
+
+        records = []
+        for example, prompt_ids, rationale in zip(examples, prompts, rationales):
+            lead_ids, choice_ids = choice_token_ids(
+                self.tokenizer, self._lead_text(rationale), PUBMEDQA_LABELS
+            )
+            scores = _choice_log_probs(self.model, prompt_ids + lead_ids, choice_ids)
+            label, tied = choose_label(scores, order=PUBMEDQA_LABELS)
+            records.append(
+                {
+                    "pubid": example["pubid"],
+                    "gold": example["final_decision"],
+                    "prediction": label,
+                    "tied": tied,
+                    "log_probs": scores,
+                    "rationale": rationale,
+                }
+            )
+        return records
+
+
+def summarise_pubmedqa(
+    predictions: list[dict[str, Any]],
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    references = [record["gold"] for record in predictions]
+    labels = [record["prediction"] for record in predictions]
+    tied_predictions = sum(1 for record in predictions if record["tied"])
+    matrix = confusion_matrix_counts(references, labels, PUBMEDQA_LABELS)
+    collapsed = is_collapsed(labels)
 
     warnings: list[str] = []
     if collapsed:
@@ -149,20 +174,58 @@ def evaluate_pubmedqa(
             f"{tied_predictions} prediction(s) were decided by a tie between candidates."
         )
 
-    return {
-        "accuracy": accuracy(references, predictions),
+    summary: dict[str, Any] = {
+        "accuracy": accuracy(references, labels),
         "macro_f1": macro_f1(matrix, PUBMEDQA_LABELS),
         "weighted_f1": weighted_f1(matrix, PUBMEDQA_LABELS),
-        "majority_class_rate": baseline,
+        "majority_class_rate": majority_class_rate(references),
+        "max_prediction_share": max_prediction_share(labels),
         "collapsed": collapsed,
         "tied_predictions": tied_predictions,
         "label_order": list(PUBMEDQA_LABELS),
         "confusion_matrix": matrix,
-        "reference_counts": reference_distribution,
-        "prediction_counts": prediction_distribution,
-        "num_samples": len(predictions),
+        "reference_counts": reference_counts(references),
+        "prediction_counts": prediction_counts(labels),
+        "num_samples": len(labels),
         "warnings": warnings,
     }
+    if bootstrap_samples and references:
+        summary["confidence_intervals"] = {
+            "level": 0.95,
+            "samples": bootstrap_samples,
+            "accuracy": bootstrap_interval(references, labels, accuracy, bootstrap_samples, seed),
+            "macro_f1": bootstrap_interval(
+                references, labels, macro_f1_score, bootstrap_samples, seed
+            ),
+        }
+    return summary
+
+
+def evaluate_pubmedqa(
+    model: Any,
+    tokenizer: Any,
+    dataset: Dataset,
+    config: LoRAPlusConfig,
+    bootstrap_samples: int | None = None,
+    show_progress: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return ``(metrics, per-example predictions)`` for normalised examples."""
+    was_training = model.training
+    model.eval()
+    predictor = PubMedQAPredictor(model, tokenizer, config)
+    batch_size = max(1, config.eval_batch_size)
+    predictions: list[dict[str, Any]] = []
+    for start in tqdm(
+        range(0, len(dataset), batch_size),
+        desc="Evaluating PubMedQA",
+        disable=not show_progress,
+    ):
+        batch = [dataset[index] for index in range(start, min(start + batch_size, len(dataset)))]
+        predictions.extend(predictor.predict_batch(batch))
+    if was_training:
+        model.train()
+    samples = config.bootstrap_samples if bootstrap_samples is None else bootstrap_samples
+    return summarise_pubmedqa(predictions, samples, config.seed), predictions
 
 
 def evaluate_mmlu_medical(
@@ -174,6 +237,7 @@ def evaluate_mmlu_medical(
         config.mmlu_dataset_id,
         config.mmlu_dataset_config,
         split=config.mmlu_split,
+        revision=config.mmlu_revision,
     )
     medical_data = mmlu_dataset.filter(lambda row: row["subject"] in MMLU_MEDICAL_TASKS)
 
@@ -182,52 +246,37 @@ def evaluate_mmlu_medical(
         if subject in subject_totals:
             subject_totals[subject] += 1
 
-    plan = subject_sample_plan(
-        subject_totals,
-        config.mmlu_eval_samples,
-        MMLU_MEDICAL_TASKS,
-    )
+    plan = subject_sample_plan(subject_totals, config.mmlu_eval_samples, MMLU_MEDICAL_TASKS)
     selected_rows = select_subject_rows(list(medical_data["subject"]), plan)
 
-    subject_results = {
-        subject: {"correct": 0, "total": 0} for subject in MMLU_MEDICAL_TASKS
-    }
-    mmlu_candidates = {choice: f" {choice}" for choice in MMLU_CHOICES}
-    max_candidate_tokens = max(
-        len(tokenizer(candidate, add_special_tokens=False)["input_ids"])
-        for candidate in mmlu_candidates.values()
-    )
-    prompt_budget = max(config.max_length - max_candidate_tokens, 1)
+    subject_results = {subject: {"correct": 0, "total": 0} for subject in MMLU_MEDICAL_TASKS}
+    chat_format = ChatFormat.from_tokenizer(tokenizer, config.chat_template_kwargs)
+    lead_ids, choice_ids = choice_token_ids(tokenizer, chat_format.completion_prefix, MMLU_CHOICES)
     model.eval()
 
     for row_index in tqdm(selected_rows, desc="Evaluating MMLU medical"):
         example = medical_data[row_index]
-        prompt = "The following are multiple choice questions about medical knowledge.\n"
-        prompt += f"Question: {example['question']}\n"
-        for index, choice in enumerate(example["choices"]):
-            prompt += f"{chr(65 + index)}. {choice}\n"
-        prompt += "Answer:"
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        prompt_ids = prompt_ids[-prompt_budget:]
-        prediction, _ = _predict_from_candidates(
-            model,
-            tokenizer,
-            prompt_ids,
-            mmlu_candidates,
-            order=MMLU_CHOICES,
+        options = "\n".join(
+            f"{letter}. {choice}" for letter, choice in zip(MMLU_CHOICES, example["choices"])
         )
-        predicted_index = ord(prediction) - ord("A")
+        user_text = (
+            "The following is a multiple choice question about medical knowledge.\n\n"
+            f"{example['question']}\n{options}\n\n"
+            "Answer with the letter of the correct option only."
+        )
+        prompt = chat_format.render_prompt(tokenizer, user_text)
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        scores = _choice_log_probs(model, prompt_ids + lead_ids, choice_ids)
+        prediction, _ = choose_label(scores, order=MMLU_CHOICES)
         subject = example["subject"]
         subject_results[subject]["total"] += 1
-        if predicted_index == example["answer"]:
+        if MMLU_CHOICES.index(prediction) == example["answer"]:
             subject_results[subject]["correct"] += 1
 
     total_correct = sum(result["correct"] for result in subject_results.values())
     total_samples = sum(result["total"] for result in subject_results.values())
     subject_accuracies = {
-        subject: (
-            result["correct"] / result["total"] if result["total"] else None
-        )
+        subject: (result["correct"] / result["total"] if result["total"] else None)
         for subject, result in subject_results.items()
     }
 
@@ -238,9 +287,7 @@ def evaluate_mmlu_medical(
         if count == 0 or subject_results[subject]["total"] == 0
     ]
     if uncovered:
-        warnings.append(
-            "No MMLU samples were evaluated for: " + ", ".join(sorted(uncovered))
-        )
+        warnings.append("No MMLU samples were evaluated for: " + ", ".join(sorted(uncovered)))
     covered_subjects = [
         subject for subject in MMLU_MEDICAL_TASKS if subject_results[subject]["total"] > 0
     ]
@@ -251,9 +298,7 @@ def evaluate_mmlu_medical(
         )
 
     return {
-        "overall_accuracy": (
-            total_correct / total_samples if total_samples else 0.0
-        ),
+        "overall_accuracy": (total_correct / total_samples if total_samples else 0.0),
         "subject_accuracies": subject_accuracies,
         "subject_results": subject_results,
         "sample_plan": plan,
@@ -268,8 +313,11 @@ def run_evaluation_suite(
     tokenizer: Any,
     dataset: Dataset,
     config: LoRAPlusConfig,
-) -> dict[str, Any]:
-    return {
-        "pubmedqa": evaluate_pubmedqa(model, tokenizer, dataset, config),
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return ``(evaluation, PubMedQA predictions)`` on the reported test split."""
+    pubmedqa, predictions = evaluate_pubmedqa(model, tokenizer, dataset, config)
+    evaluation = {
+        "pubmedqa": pubmedqa,
         "mmlu_medical": evaluate_mmlu_medical(model, tokenizer, config),
     }
+    return evaluation, predictions

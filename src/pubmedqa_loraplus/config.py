@@ -1,19 +1,12 @@
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .paths import resolve_repo_path
+from .prompts import TARGET_FORMATS
 
-DEFAULT_TARGET_MODULES = [
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-]
 VALID_MODEL_DTYPES = {"auto", "float32", "float16", "bfloat16"}
 
 
@@ -31,34 +24,43 @@ class LoRAPlusConfig:
     # GPU, timeout, secret and image are properties of the Modal app, not of a
     # training run, so they are not part of the config.
     modal_mount_root: str = "/vol/pubmedqa-loraplus"
+    base_model_revision: str | None = None
+    dataset_revision: str | None = None
     model_dtype: str = "auto"
-    test_size: float = 0.1
     validation_size: float = 0.1
     seed: int = 42
-    max_length: int = 1024
+    max_length: int = 1536
+    target_format: str = "rationale"
+    chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
+    rationale_max_new_tokens: int = 192
+    balance_train_classes: bool = True
+    pqa_artificial_samples: int = 0
     train_batch_size: int = 4
-    eval_batch_size: int = 4
+    eval_batch_size: int = 16
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 5e-5
-    loraplus_lr_ratio: float = 16.0
+    learning_rate: float = 1e-4
+    loraplus_lr_ratio: float = 4.0
     loraplus_lr_embedding: float = 1e-6
     num_epochs: int = 3
     logging_steps: int = 10
-    save_steps: int = 200
-    eval_steps: int = 200
-    lora_r: int = 16
-    lora_alpha: int = 32
+    save_steps: int = 20
+    eval_steps: int = 20
+    lora_r: int = 32
+    lora_alpha: int = 64
     lora_dropout: float = 0.05
-    target_modules: list[str] = field(default_factory=lambda: list(DEFAULT_TARGET_MODULES))
-    warmup_ratio: float = 0.03
+    target_modules: str | list[str] = "all-linear"
+    warmup_ratio: float = 0.05
     weight_decay: float = 0.0
     lr_scheduler_type: str = "cosine"
     group_by_length: bool = True
     max_grad_norm: float = 1.0
-    mmlu_eval_samples: int = 50
+    evaluate_base_model: bool = True
+    bootstrap_samples: int = 1000
+    mmlu_eval_samples: int = 300
     mmlu_dataset_id: str = "cais/mmlu"
     mmlu_dataset_config: str = "all"
     mmlu_split: str = "test"
+    mmlu_revision: str | None = None
     use_wandb: bool = True
     wandb_project: str = "pubmedqa-loraplus"
     wandb_run_name: str | None = None
@@ -83,9 +85,13 @@ class LoRAPlusConfig:
         if self.loraplus_lr_ratio < 1.0:
             raise ValueError("loraplus_lr_ratio must be >= 1.0")
         if self.model_dtype not in VALID_MODEL_DTYPES:
-            raise ValueError(
-                f"model_dtype must be one of {sorted(VALID_MODEL_DTYPES)}"
-            )
+            raise ValueError(f"model_dtype must be one of {sorted(VALID_MODEL_DTYPES)}")
+        if self.target_format not in TARGET_FORMATS:
+            raise ValueError(f"target_format must be one of {list(TARGET_FORMATS)}")
+        if not 0.0 < self.validation_size < 1.0:
+            raise ValueError("validation_size must be between 0 and 1")
+        if self.pqa_artificial_samples < 0:
+            raise ValueError("pqa_artificial_samples must be >= 0")
         if self.resume_from_checkpoint is not None:
             self.resume_from_checkpoint = str(resolve_repo_path(self.resume_from_checkpoint))
 
@@ -114,6 +120,14 @@ class LoRAPlusConfig:
     @property
     def report_path(self) -> Path:
         return self.reports_root / f"{self.run_name}.json"
+
+    @property
+    def predictions_path(self) -> Path:
+        return self.reports_root / f"{self.run_name}_predictions.jsonl"
+
+    @property
+    def baseline_predictions_path(self) -> Path:
+        return self.reports_root / f"{self.run_name}_baseline_predictions.jsonl"
 
     @property
     def training_log_path(self) -> Path:
@@ -158,3 +172,24 @@ class LoRAPlusConfig:
             encoding="utf-8",
         )
         return self.config_snapshot_path
+
+
+def planned_optimizer_steps(
+    config: LoRAPlusConfig, train_examples: int, world_size: int = 1
+) -> int:
+    """Optimizer steps ``Trainer`` will run, raising if selection would never evaluate.
+
+    The published run planned ~150 steps against ``eval_steps=200``, so the
+    validation split was never scored and ``load_best_model_at_end`` silently
+    kept the last step. Failing here makes that configuration impossible.
+    """
+    batches = math.ceil(train_examples / (config.train_batch_size * world_size))
+    steps = math.ceil(batches / config.gradient_accumulation_steps) * config.num_epochs
+    if steps < config.eval_steps:
+        raise ValueError(
+            f"Training runs {steps} optimizer steps but eval_steps={config.eval_steps}: "
+            "checkpoint selection would never evaluate. Lower eval_steps/save_steps."
+        )
+    if config.save_steps % config.eval_steps:
+        raise ValueError("save_steps must be a multiple of eval_steps for best-model selection")
+    return steps

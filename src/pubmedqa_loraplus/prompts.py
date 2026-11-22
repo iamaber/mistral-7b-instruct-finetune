@@ -1,79 +1,134 @@
-"""Prompt formatting and token budgeting helpers.
+"""Prompt and completion formatting.
 
 Kept free of torch/datasets imports so the logic can be unit-tested on CPU.
+Every prompt goes through the tokenizer's own chat template, so swapping the
+base model does not leave a Mistral-specific ``[INST]`` string behind.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal, Mapping, Sequence
 
-BOS_TOKEN = "<s>"
-EOS_TOKEN = "</s>"
+TargetFormat = Literal["label", "rationale"]
+TARGET_FORMATS: tuple[str, ...] = ("label", "rationale")
+ANSWER_MARKER = "Answer:"
+
+_INSTRUCTIONS: dict[str, str] = {
+    "label": "Answer the question with exactly one word: yes, no, or maybe.",
+    "rationale": (
+        "Write a short conclusion supported by the abstract, then give the final "
+        f"answer on its own line as '{ANSWER_MARKER} yes', '{ANSWER_MARKER} no', "
+        f"or '{ANSWER_MARKER} maybe'."
+    ),
+}
+
+_SENTINEL = "\x00PUBMEDQA_ASSISTANT\x00"
 
 
-def build_prompt_parts(
-    question: str,
-    context: str,
-    bos_token: str = BOS_TOKEN,
-) -> tuple[str, str, str]:
-    """Split the instruction prompt into (head, context, tail) text segments.
+def build_user_message(question: str, context: str, target_format: str) -> str:
+    return f"Context: {context}\n\nQuestion: {question}\n\n{_INSTRUCTIONS[target_format]}"
 
-    Keeping the context as its own segment lets the token budget drop context
-    text while preserving the instruction markers and the question itself,
-    which a plain head-truncation of the joined prompt would cut off.
+
+def build_completion_content(decision: str, long_answer: str | None, target_format: str) -> str:
+    """The assistant turn the model is trained to produce.
+
+    ``label`` supervises the decision alone. ``rationale`` supervises PubMedQA's
+    ``long_answer`` (the abstract's own conclusion, which the context omits)
+    followed by the decision, so the loss covers tokens that depend on the
+    abstract instead of two label tokens.
     """
-    head = f"{bos_token}[INST] Context: "
-    tail = f"\n\nQuestion: {question} [/INST]"
-    return head, context, tail
+    label = decision.strip().lower()
+    if target_format == "label":
+        return label
+    if not long_answer or not long_answer.strip():
+        raise ValueError("rationale targets need a non-empty long_answer")
+    return f"{long_answer.strip()}\n{ANSWER_MARKER} {label}"
 
 
-def build_instruction_prompt(
-    question: str,
-    context: str,
-    bos_token: str = BOS_TOKEN,
-) -> str:
-    head, body, tail = build_prompt_parts(question, context, bos_token)
-    return f"{head}{body}{tail}"
+def extract_rationale(generated: str) -> str:
+    """Text the model wrote before its ``Answer:`` line (all of it if absent)."""
+    return generated.split(ANSWER_MARKER, 1)[0].strip()
 
 
-def build_answer_text(answer: str, eos_token: str = EOS_TOKEN) -> str:
-    return f" {answer.lower()}{eos_token}"
+@dataclass(frozen=True)
+class ChatFormat:
+    """How the tokenizer's chat template wraps one user turn and its reply.
 
-
-def fit_prompt_ids(
-    head_ids: Sequence[int],
-    context_ids: Sequence[int],
-    tail_ids: Sequence[int],
-    budget: int,
-) -> list[int]:
-    """Fit a prompt into ``budget`` tokens without losing the instruction suffix.
-
-    The head and the tail (``Question: ... [/INST]``) are always kept. Context
-    tokens are dropped from the left because the end of a PubMedQA abstract —
-    the conclusion — is the part that answers the question.
-
-    The published run never hit this path: the longest of 100 real
-    ``pqa_labeled`` prompts tokenized to 688 tokens against a 1024 budget, so
-    left-truncating the joined prompt would not have removed the question. The
-    guard matters for longer abstracts and smaller ``max_length`` values, so it
-    is still used for both training and evaluation.
+    ``completion_prefix``/``completion_suffix`` are the template text around the
+    assistant content (a single space and ``</s>`` for Mistral v0.3, nothing and
+    ``<|im_end|>\\n`` for ChatML). They are recovered by rendering a sentinel
+    reply, so no template is hard-coded here.
     """
-    if budget < 1:
-        raise ValueError("budget must be >= 1")
 
-    tail = list(tail_ids)
-    if len(tail) >= budget:
-        return tail[-budget:]
+    completion_prefix: str
+    completion_suffix: str
+    template_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
-    head = list(head_ids)
-    remaining = budget - len(tail)
-    if len(head) >= remaining:
-        return head[:remaining] + tail
-    remaining -= len(head)
+    @classmethod
+    def from_tokenizer(
+        cls,
+        tokenizer: Any,
+        template_kwargs: Mapping[str, Any] | None = None,
+    ) -> "ChatFormat":
+        kwargs = dict(template_kwargs or {})
+        user = [{"role": "user", "content": "question"}]
+        prompt = tokenizer.apply_chat_template(
+            user, tokenize=False, add_generation_prompt=True, **kwargs
+        )
+        full = tokenizer.apply_chat_template(
+            user + [{"role": "assistant", "content": _SENTINEL}],
+            tokenize=False,
+            **kwargs,
+        )
+        if not full.startswith(prompt):
+            raise ValueError(
+                "The chat template does not render the generation prompt as a prefix of "
+                "the full conversation; pass chat_template_kwargs that make them agree."
+            )
+        prefix, found, suffix = full[len(prompt) :].partition(_SENTINEL)
+        if not found:
+            raise ValueError("The chat template dropped the assistant content")
+        return cls(prefix, suffix, kwargs)
 
-    context = list(context_ids)
-    if remaining > 0:
-        context = context[-remaining:]
-    else:
-        context = []
-    return head + context + tail
+    def render_prompt(self, tokenizer: Any, user_text: str) -> str:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_text}],
+            tokenize=False,
+            add_generation_prompt=True,
+            **self.template_kwargs,
+        )
+
+    def completion_text(self, content: str) -> str:
+        return f"{self.completion_prefix}{content}{self.completion_suffix}"
+
+
+def choice_token_ids(
+    tokenizer: Any,
+    lead_text: str,
+    choices: Sequence[str],
+) -> tuple[list[int], dict[str, int]]:
+    """Return ``(lead_ids, {choice: token_id})`` for scoring one-token decisions.
+
+    Each ``lead_text + choice`` is tokenized whole, exactly as the training
+    completion is. Their shared token prefix is the lead the model is fed; the
+    next token is the choice's decision token. Scoring that single position
+    replaces the old sum over ``" yes</s>"``, whose EOS term was a stop
+    probability rather than a label probability.
+    """
+    encoded = {
+        choice: tokenizer(lead_text + choice, add_special_tokens=False)["input_ids"]
+        for choice in choices
+    }
+    sequences = list(encoded.values())
+    shared = 0
+    while (
+        all(len(ids) > shared for ids in sequences) and len({ids[shared] for ids in sequences}) == 1
+    ):
+        shared += 1
+    if any(len(ids) <= shared for ids in sequences):
+        raise ValueError(f"choices {list(choices)} share every token after {lead_text!r}")
+    ids = {choice: tokens[shared] for choice, tokens in encoded.items()}
+    if len(set(ids.values())) != len(choices):
+        raise ValueError(f"choices {list(choices)} do not start with distinct tokens")
+    return sequences[0][:shared], ids

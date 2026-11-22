@@ -5,6 +5,8 @@ from typing import Any
 
 from .artifact import prepare_adapter_for_publish
 from .config import LoRAPlusConfig
+from .prompts import build_user_message
+from .splits import OFFICIAL_TEST_SPLIT
 
 PUBMEDQA_CITATION = "\n".join(
     [
@@ -42,6 +44,44 @@ def _format_metric(value: Any, digits: int = 4) -> str:
     if isinstance(value, float):
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def _format_interval(interval: list[float] | None) -> str:
+    if not interval or len(interval) != 2:
+        return "not available"
+    return f"[{interval[0]:.4f}, {interval[1]:.4f}]"
+
+
+def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
+    """Base-model zero-shot numbers and the paired delta, when the run recorded them."""
+    baseline = evaluation.get("baseline", {}).get("pubmedqa")
+    if not baseline:
+        return []
+    pubmedqa = evaluation.get("pubmedqa", {})
+    delta = evaluation.get("delta_vs_baseline", {})
+    rows = []
+    for name, key in (("Accuracy", "accuracy"), ("Macro F1", "macro_f1")):
+        change = delta.get(key, {})
+        rows.append(
+            f"| {name} | {_format_metric(baseline.get(key))} | "
+            f"{_format_metric(pubmedqa.get(key))} | {_format_metric(change.get('delta'))} | "
+            f"{_format_interval(change.get('interval'))} |"
+        )
+    lines = [
+        "### Base model (zero-shot) vs this fine-tune",
+        "",
+        "Same questions, same prompt, adapter disabled for the baseline. The interval is a "
+        "paired bootstrap over questions; a fine-tune has only shown an improvement when "
+        "the interval excludes zero.",
+        "",
+        "| Metric | Base model | Fine-tune | Delta | 95% interval of delta |",
+        "| --- | --- | --- | --- | --- |",
+        *rows,
+        "",
+    ]
+    if baseline.get("collapsed"):
+        lines.extend(["> The base model's predictions were also a single label.", ""])
+    return lines
 
 
 def _confusion_matrix_table(
@@ -114,11 +154,22 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
         ]
     )
 
+    intervals = pubmedqa.get("confidence_intervals")
+    if intervals:
+        lines.extend(
+            [
+                f"95% bootstrap intervals ({_format_metric(intervals.get('samples'))} "
+                f"resamples): accuracy {_format_interval(intervals.get('accuracy'))}, "
+                f"macro F1 {_format_interval(intervals.get('macro_f1'))}.",
+                "",
+            ]
+        )
+
+    lines.extend(_baseline_section(evaluation))
+
     prediction_counts = pubmedqa.get("prediction_counts")
     if prediction_counts:
-        rendered = ", ".join(
-            f"{label}: {prediction_counts.get(label, 0)}" for label in label_order
-        )
+        rendered = ", ".join(f"{label}: {prediction_counts.get(label, 0)}" for label in label_order)
         lines.append(f"Predicted-label distribution: {rendered}.")
         lines.append("")
 
@@ -151,9 +202,7 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
     covered = mmlu.get("covered_subjects")
     subject_results = mmlu.get("subject_results", {})
     evaluated_subjects = [
-        subject
-        for subject, result in subject_results.items()
-        if result.get("total", 0) > 0
+        subject for subject, result in subject_results.items() if result.get("total", 0) > 0
     ]
     lines.extend(
         [
@@ -301,22 +350,27 @@ def _limitations_section(report: dict[str, Any] | None) -> list[str]:
             if validation_examples is not None
             else ""
         )
-        lines.append(
-            f"- **Small evaluation.** The reported metrics rest on {size}{split_note}, far "
-            "too little to characterise a 7B model, and the holdout comes from PubMedQA's "
-            "`pqa_labeled` training pool rather than the official test set."
-        )
+        if report.get("test_split") == OFFICIAL_TEST_SPLIT:
+            lines.append(
+                f"- **One benchmark, one run.** The reported metrics rest on {size} (PubMedQA's "
+                f"official test set){split_note} from a single training seed. A 500-question "
+                "test cannot resolve differences much smaller than ~9 points of accuracy."
+            )
+        else:
+            lines.append(
+                f"- **Small evaluation.** The reported metrics rest on {size}{split_note}, far "
+                "too little to characterise a 7B model, and the holdout comes from PubMedQA's "
+                "`pqa_labeled` training pool rather than the official test set."
+            )
     else:
         lines.append(
-            "- **Small evaluation scale.** The pipeline holds out a fraction of "
-            "PubMedQA's `pqa_labeled` training pool, which is not the official test set and "
-            "is too little to characterise a 7B model."
+            "- **No evaluation report.** Nothing about prediction quality on PubMedQA's "
+            "official test set is recorded for this artifact."
         )
 
     lines.extend(
         [
-            "- **English only**, and only on PubMed-style abstracts and multiple-choice "
-            "questions.",
+            "- **English only**, and only on PubMed-style abstracts and multiple-choice questions.",
             "- **Training-data bias carries over** from the base model and from PubMedQA's "
             "published-literature selection.",
             "",
@@ -325,13 +379,36 @@ def _limitations_section(report: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def _generation_lines(target_format: str, max_new_tokens: int) -> list[str]:
+    user_text = build_user_message("<question>", "<abstract text>", target_format)
+    return [
+        f'messages = [{{"role": "user", "content": {user_text!r}}}]',
+        "inputs = tokenizer.apply_chat_template(",
+        '    messages, add_generation_prompt=True, return_tensors="pt", return_dict=True',
+        ").to(model.device)",
+        "with torch.no_grad():",
+        f"    output = model.generate(**inputs, max_new_tokens={max_new_tokens}, do_sample=False)",
+        'new_tokens = output[0][inputs["input_ids"].shape[-1]:]',
+        "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+    ]
+
+
 def _usage_section(
+    config: LoRAPlusConfig,
     artifact: str,
-    base_model_id: str,
     repo_id: str | None,
     collapsed: bool | None,
 ) -> list[str]:
     target = repo_id or "<this-repo-id>"
+    max_new_tokens = 8
+    if config.target_format == "rationale":
+        max_new_tokens = config.rationale_max_new_tokens + 8
+    generation = _generation_lines(config.target_format, max_new_tokens)
+    answer_note = (
+        "The model writes a short conclusion and ends with `Answer: yes|no|maybe`."
+        if config.target_format == "rationale"
+        else "The model answers with one word: `yes`, `no` or `maybe`."
+    )
     if artifact == "adapter":
         return [
             "## Usage",
@@ -344,27 +421,21 @@ def _usage_section(
             "from peft import PeftModel",
             "from transformers import AutoModelForCausalLM, AutoTokenizer",
             "",
-            f'base_model_id = "{base_model_id}"',
+            f'base_model_id = "{config.base_model_id}"',
             "",
             "tokenizer = AutoTokenizer.from_pretrained(base_model_id)",
             "base_model = AutoModelForCausalLM.from_pretrained(",
             "    base_model_id,",
-            "    torch_dtype=torch.bfloat16,",
-            "    device_map=\"auto\",",
+            "    dtype=torch.bfloat16,",
+            '    device_map="auto",',
             ")",
             f'model = PeftModel.from_pretrained(base_model, "{target}")',
             "model.eval()",
             "",
-            "prompt = (",
-            "    \"<s>[INST] Context: <abstract text>\\n\\n\"",
-            "    \"Question: <question> [/INST]\"",
-            ")",
-            "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
-            "with torch.no_grad():",
-            "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-            "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
-            "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+            *generation,
             "```",
+            "",
+            answer_note,
             "",
             "The adapter config stores the base model as a Hub id, so the snippet above "
             "resolves the base without needing a local copy of the training files.",
@@ -386,21 +457,15 @@ def _usage_section(
         f'tokenizer = AutoTokenizer.from_pretrained("{target}")',
         "model = AutoModelForCausalLM.from_pretrained(",
         f'    "{target}",',
-        "    torch_dtype=torch.bfloat16,",
-        "    device_map=\"auto\",",
+        "    dtype=torch.bfloat16,",
+        '    device_map="auto",',
         ")",
         "model.eval()",
         "",
-        "prompt = (",
-        "    \"<s>[INST] Context: <abstract text>\\n\\n\"",
-        "    \"Question: <question> [/INST]\"",
-        ")",
-        "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
-        "with torch.no_grad():",
-        "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-        "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
-        "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+        *generation,
         "```",
+        "",
+        answer_note,
         "",
         *_collapse_expectation(collapsed),
         "",
@@ -413,9 +478,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
 
     report = _load_report(config)
     library_name = "peft" if artifact == "adapter" else "transformers"
-    repo_id = (
-        config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
-    )
+    repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
     title = (
         f"{config.run_name} (LoRA+ adapter)"
         if artifact == "adapter"
@@ -473,9 +536,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         "",
     ]
 
-    lines.extend(
-        _usage_section(artifact, config.base_model_id, repo_id, _pubmedqa_collapsed(report))
-    )
+    lines.extend(_usage_section(config, artifact, repo_id, _pubmedqa_collapsed(report)))
 
     lines.extend(
         [
@@ -484,6 +545,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             f"- Base model: `{config.base_model_id}`",
             f"- Dataset: `{config.dataset_id}` / `{config.dataset_config}`",
             f"- Artifact type: `{artifact}`",
+            f"- Target: `{config.target_format}`",
             (
                 f"- LoRA+: rank={config.lora_r}, alpha={config.lora_alpha}, "
                 f"dropout={config.lora_dropout}, lr_ratio={config.loraplus_lr_ratio}"
@@ -511,10 +573,8 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
                 _format_metric(training_metrics.get("train_loss")),
             ),
             (
-                "Best eval loss",
-                _format_metric(
-                    summary.get("best_eval_loss", training.get("best_eval_loss"))
-                ),
+                "Best validation macro F1 (selection metric)",
+                _format_metric(summary.get("best_validation_macro_f1")),
             ),
             (
                 "Latest eval loss",
@@ -544,10 +604,11 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             "## Training data",
             "",
             "`qiaojin/PubMedQA` (`pqa_labeled`), 1,000 expert-annotated biomedical "
-            "research questions with yes/no/maybe decisions. The pipeline holds out a test "
-            "split and a separate validation split used for checkpoint selection. PubMedQA "
-            "is released under the MIT licence; its abstracts are derived from PubMed and "
-            "remain subject to the original publishers' terms.",
+            "research questions with yes/no/maybe decisions. Runs from this pipeline report "
+            "on PubMedQA's official 500-question test set, selected by PMID, and train on the "
+            "other 500 minus a stratified validation split used for checkpoint selection. "
+            "PubMedQA is released under the MIT licence; its abstracts are derived from "
+            "PubMed and remain subject to the original publishers' terms.",
             "",
         ]
     )
@@ -560,8 +621,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             f"`{config.base_model_id}` base model, which is itself Apache-2.0.",
             "- Using or redistributing the base model is subject to the Mistral AI "
             "licence terms that accompany it, not to this repository alone.",
-            "- PubMedQA is MIT-licensed; see its dataset card for the abstract "
-            "provenance terms.",
+            "- PubMedQA is MIT-licensed; see its dataset card for the abstract provenance terms.",
             "",
             "## Citation",
             "",
@@ -585,14 +645,14 @@ def push_artifact_to_hub(
     if artifact not in {"adapter", "merged"}:
         raise ValueError("artifact must be 'adapter' or 'merged'")
 
-    repo_id = (
-        config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
-    )
+    repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
     if not repo_id:
         raise ValueError(f"No Hugging Face repo configured for {artifact} artifact")
 
-    artifact_dir = Path(source_dir) if source_dir is not None else (
-        config.adapter_output_dir if artifact == "adapter" else config.merged_output_dir
+    artifact_dir = (
+        Path(source_dir)
+        if source_dir is not None
+        else (config.adapter_output_dir if artifact == "adapter" else config.merged_output_dir)
     )
     if not artifact_dir.exists():
         raise FileNotFoundError(f"Artifact directory does not exist: {artifact_dir}")

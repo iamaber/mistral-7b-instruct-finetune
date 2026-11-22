@@ -1,82 +1,15 @@
-"""CPU-only tests for candidate scoring and label choice.
-
-These pin the causal-index contract and the length normalisation. They do not
-reproduce the published collapse: that run came from the notebook, whose
-scoring loop already used the correct ``prompt_length - 1`` offset, so the
-off-by-one fixed here was present only in ``src/pubmedqa_loraplus/evaluation.py``.
-"""
+"""CPU-only tests for label choice and the bootstrap intervals."""
 
 import pytest
 
 from src.pubmedqa_loraplus.scoring import (
+    accuracy,
+    bootstrap_interval,
     choose_label,
-    normalise_candidate_scores,
-    score_candidate,
+    macro_f1_score,
+    max_prediction_share,
+    paired_bootstrap_delta,
 )
-
-
-def test_first_candidate_token_is_scored_with_last_prompt_logits():
-    """The candidate's first token must be read at prompt_length - 1.
-
-    A causal LM's logits at position i predict the token at i + 1, so scoring
-    from prompt_length skips the logit that decides which label the model
-    wants and never reads it at all.
-    """
-    prompt_length = 5
-    candidate_ids = [10, 11, 12]
-    seen: list[tuple[int, int]] = []
-
-    def log_prob_at(position: int, token_id: int) -> float:
-        seen.append((position, token_id))
-        return -1.0
-
-    score_candidate(prompt_length, candidate_ids, log_prob_at)
-
-    assert seen == [(4, 10), (5, 11), (6, 12)]
-
-
-def test_score_candidate_sums_all_candidate_tokens():
-    def log_prob_at(position: int, token_id: int) -> float:
-        return -0.5
-
-    assert score_candidate(3, [7, 8], log_prob_at) == pytest.approx(-1.0)
-
-
-def test_score_candidate_rejects_empty_candidate():
-    with pytest.raises(ValueError):
-        score_candidate(3, [], lambda position, token_id: 0.0)
-
-
-def test_score_candidate_rejects_empty_prompt():
-    with pytest.raises(ValueError):
-        score_candidate(0, [1], lambda position, token_id: 0.0)
-
-
-def test_length_normalisation_prevents_multi_token_label_bias():
-    """A shorter label must not win purely by having fewer tokens.
-
-    With equal per-token probability, the summed log-probability of a
-    three-token candidate is lower than a one-token candidate's, which would
-    favour the short label regardless of content.
-    """
-    per_token_log_prob = -0.1
-    raw = {"yes": per_token_log_prob, "maybe": per_token_log_prob * 3}
-    counts = {"yes": 1, "maybe": 3}
-
-    normalised = normalise_candidate_scores(raw, counts)
-
-    assert normalised["yes"] == pytest.approx(-0.1)
-    assert normalised["maybe"] == pytest.approx(-0.1)
-
-
-def test_normalisation_requires_matching_keys():
-    with pytest.raises(ValueError):
-        normalise_candidate_scores({"yes": -1.0}, {"no": 1})
-
-
-def test_normalisation_rejects_zero_token_candidate():
-    with pytest.raises(ValueError):
-        normalise_candidate_scores({"yes": -1.0}, {"yes": 0})
 
 
 def test_choose_label_picks_highest_score():
@@ -96,36 +29,39 @@ def test_choose_label_requires_scores():
         choose_label({})
 
 
-def test_causal_offset_decides_the_label_and_the_off_by_one_erases_it():
-    """Prove the consequence of the old ``prompt_length + offset`` index.
+REFERENCES = ["yes"] * 50 + ["no"] * 35 + ["maybe"] * 15
+GOOD = ["yes"] * 45 + ["no"] * 5 + ["no"] * 30 + ["yes"] * 5 + ["maybe"] * 10 + ["no"] * 5
+ALL_YES = ["yes"] * 100
 
-    The stub pretends the last prompt position strongly prefers the ``yes``
-    token and is neutral elsewhere. Reading from ``prompt_length - 1`` picks
-    ``yes``; reading from ``prompt_length`` (the old behaviour) never looks at
-    that position, so every candidate scores the same and the winner is just
-    whichever label ``max`` sees first.
-    """
-    prompt_length = 4
-    yes_token = 900
-    scores_at = {3: {yes_token: -0.01, 901: -9.0, 902: -9.0}}
 
-    def log_prob_at(position: int, token_id: int) -> float:
-        return scores_at.get(position, {}).get(token_id, -5.0)
+def test_bootstrap_interval_brackets_the_point_estimate():
+    low, high = bootstrap_interval(REFERENCES, GOOD, accuracy, samples=500, seed=0)
 
-    candidates = {"yes": [yes_token], "no": [901], "maybe": [902]}
+    assert low < accuracy(REFERENCES, GOOD) < high
+    assert 0.0 <= low and high <= 1.0
 
-    fixed = {
-        label: score_candidate(prompt_length, ids, log_prob_at)
-        for label, ids in candidates.items()
-    }
-    buggy = {
-        label: sum(
-            log_prob_at(prompt_length + offset, token_id)
-            for offset, token_id in enumerate(ids)
-        )
-        for label, ids in candidates.items()
-    }
 
-    assert choose_label(fixed) == ("yes", False)
-    # The old index gives every label the identical score.
-    assert len(set(buggy.values())) == 1
+def test_bootstrap_interval_is_reproducible_for_a_seed():
+    first = bootstrap_interval(REFERENCES, GOOD, macro_f1_score, samples=200, seed=7)
+    second = bootstrap_interval(REFERENCES, GOOD, macro_f1_score, samples=200, seed=7)
+
+    assert first == second
+
+
+def test_paired_delta_of_a_predictor_against_itself_is_exactly_zero():
+    result = paired_bootstrap_delta(REFERENCES, GOOD, GOOD, accuracy, samples=200, seed=0)
+
+    assert result["delta"] == 0.0
+    assert result["interval"] == [0.0, 0.0]
+
+
+def test_paired_delta_separates_a_real_model_from_the_majority_predictor():
+    result = paired_bootstrap_delta(REFERENCES, GOOD, ALL_YES, macro_f1_score, 500, seed=0)
+
+    assert result["delta"] > 0
+    assert result["interval"][0] > 0
+
+
+def test_max_prediction_share_flags_near_collapse_that_is_collapsed_misses():
+    assert max_prediction_share(["yes"] * 99 + ["no"]) == pytest.approx(0.99)
+    assert max_prediction_share([]) == 0.0

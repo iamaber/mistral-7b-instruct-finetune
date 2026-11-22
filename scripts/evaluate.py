@@ -12,7 +12,9 @@ from src.pubmedqa_loraplus.env import load_env_file
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a saved LoRA+ artifact.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate the base model or a saved LoRA+ artifact on the official test set."
+    )
     parser.add_argument(
         "--config",
         default="configs/loraplus_train.json",
@@ -20,9 +22,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--artifact",
-        choices=("adapter", "merged"),
+        choices=("base", "adapter", "merged"),
         default="adapter",
-        help="Saved artifact type to evaluate.",
+        help="'base' scores the untuned base model, the zero-shot baseline.",
     )
     parser.add_argument(
         "--model-path",
