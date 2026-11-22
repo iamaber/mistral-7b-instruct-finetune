@@ -119,6 +119,81 @@ def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
     return lines
 
 
+SOURCE_URL = "https://github.com/iamaber/mistral-7b-instruct-finetune"
+
+
+def _official_pubmedqa(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """PubMedQA metrics only when they come from the official test set."""
+    if not report or report.get("test_split") != OFFICIAL_TEST_SPLIT:
+        return None
+    return report.get("evaluation", {}).get("pubmedqa") or None
+
+
+def _model_index(name: str, config: LoRAPlusConfig, report: dict[str, Any] | None) -> list[str]:
+    """Hub ``model-index`` metadata, so the scores show up in search and on the model page."""
+    pubmedqa = _official_pubmedqa(report)
+    if not pubmedqa or pubmedqa.get("collapsed"):
+        return []
+    return [
+        "model-index:",
+        f"  - name: {name}",
+        "    results:",
+        "      - task:",
+        "          type: question-answering",
+        "          name: Biomedical yes/no/maybe question answering",
+        "        dataset:",
+        "          name: PubMedQA (official 500-question test set)",
+        f"          type: {config.dataset_id}",
+        f"          config: {config.dataset_config}",
+        "          split: test",
+        "        metrics:",
+        "          - type: accuracy",
+        f"            value: {pubmedqa['accuracy']:.4f}",
+        "            name: Accuracy",
+        "          - type: f1",
+        f"            value: {pubmedqa['macro_f1']:.4f}",
+        "            name: Macro F1",
+        "        source:",
+        "          name: Self-reported, scored by the training repository",
+        f"          url: {SOURCE_URL}",
+    ]
+
+
+def _headline(config: LoRAPlusConfig, report: dict[str, Any] | None) -> list[str]:
+    """One-paragraph result summary for the top of the card."""
+    pubmedqa = _official_pubmedqa(report)
+    if not pubmedqa or pubmedqa.get("collapsed"):
+        return []
+    evaluation = (report or {}).get("evaluation", {})
+    base = evaluation.get("baseline", {}).get("pubmedqa", {})
+    base_text = (
+        f" (the untuned `{config.base_model_id}` scores {base['accuracy']:.3f} and "
+        f"{base['macro_f1']:.3f} on the same questions)"
+        if base
+        else ""
+    )
+    seeds = (report or {}).get("seed_summary")
+    seed_text = (
+        f" Across {len(seeds['runs'])} training seeds: accuracy "
+        f"{seeds['accuracy_mean']:.3f} ± {seeds['accuracy_sd']:.3f}, macro-F1 "
+        f"{seeds['macro_f1_mean']:.3f} ± {seeds['macro_f1_sd']:.3f}."
+        if seeds
+        else ""
+    )
+    how = (
+        "after writing a short conclusion drawn from the abstract"
+        if config.target_format == "rationale"
+        else "in one word"
+    )
+    return [
+        f"Answers PubMed research questions with yes, no or maybe, {how}. On PubMedQA's "
+        "official 500-question test set "
+        f"it scores **{pubmedqa['accuracy']:.3f} accuracy** and **{pubmedqa['macro_f1']:.3f} "
+        f"macro-F1**{base_text}.{seed_text} Training and evaluation code: {SOURCE_URL}.",
+        "",
+    ]
+
+
 def _seed_section(report: dict[str, Any]) -> list[str]:
     """Spread of the same configuration over training seeds, when recorded."""
     runs = report.get("seed_summary", {}).get("runs")
@@ -545,15 +620,19 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
     report = _load_report(config)
     library_name = "peft" if artifact == "adapter" else "transformers"
     repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
+    base_name = config.base_model_id.split("/")[-1]
     name = repo_id.split("/")[-1] if repo_id else config.run_name
-    title = f"{name} (LoRA+ adapter)" if artifact == "adapter" else f"{name} (merged)"
+    kind = "LoRA+ adapter" if artifact == "adapter" else "merged LoRA+ model"
+    title = f"{base_name} for PubMedQA ({kind})"
+    collapsed = _pubmedqa_collapsed(report)
     purpose = (
         "It is published for reproducibility and as a record of a negative result, not "
         "as a model intended to be deployed."
-        if _pubmedqa_collapsed(report)
-        else "It is published for reproducibility with the evaluation below, not as a "
-        "model intended to be deployed."
+        if collapsed
+        else "It is published for research and reproducibility, with every number below "
+        "measured on PubMedQA's official test set."
     )
+    family = base_name.split("-")[0].lower()
 
     lines: list[str] = [
         "---",
@@ -569,39 +648,45 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         *(["  - peft"] if artifact == "adapter" else []),
         "  - lora",
         "  - loraplus",
+        f"  - {family}",
         "  - pubmedqa",
+        "  - biomedical",
         "  - medical",
-        "  - experimental",
+        "  - question-answering",
+        "  - research",
+        *_model_index(name, config, report),
         "---",
         "",
         f"# {title}",
         "",
-        "> **This is an experiment, not a usable medical model.** It is a small LoRA+ "
-        "research run on PubMedQA. Do not use it for clinical decision-making, "
-        "diagnosis, triage, or any other medical purpose. Read the evaluation and "
-        "limitations sections before drawing any conclusion.",
+        *_headline(config, report),
+        "> **Research use only. This is not a usable medical model.** Do not use it for "
+        "clinical decision-making, diagnosis, triage, or any other medical purpose. Read "
+        "the evaluation and limitations sections before drawing any conclusion.",
         "",
         "## What this is",
         "",
         f"A LoRA+ fine-tune of `{config.base_model_id}` on "
-        f"`{config.dataset_id}` / `{config.dataset_config}`, trained as a "
-        "single-GPU research exercise to check the training and evaluation pipeline "
-        f"end to end. {purpose}",
+        f"`{config.dataset_id}` / `{config.dataset_config}`: given a PubMed abstract and a "
+        "research question, it answers yes, no or maybe. "
+        f"{purpose}",
         "",
         "## Intended use",
         "",
-        "- Inspecting what a small LoRA+ run on PubMedQA's labeled pool does to an "
-        "instruction-tuned base model.",
-        "- Reproducing the evaluation and extending it: whatever the run produced is "
-        "recorded in the evaluation section, including an explicitly flagged collapse if "
-        "the predictions were degenerate.",
+        "- Research on biomedical question answering and on fine-tuning methods for it.",
+        "- A reproducible starting point: the training and evaluation code, the "
+        "per-question predictions and the zero-shot baseline are all recorded.",
         "",
         "## Out-of-scope use",
         "",
         "- Any clinical, diagnostic, triage, or treatment decision.",
-        "- Any claim that this model answers biomedical questions correctly.",
-        "- Any comparison against published PubMedQA results as if the reported accuracy "
-        "were a real result.",
+        "- Any claim that this model answers biomedical questions correctly in general.",
+        (
+            "- Any comparison against published PubMedQA results as if the reported "
+            "accuracy were a real result."
+            if collapsed
+            else "- Reading a single training run's score as a clinical accuracy figure."
+        ),
         "",
     ]
 
