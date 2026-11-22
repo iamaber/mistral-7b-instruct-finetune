@@ -17,6 +17,9 @@ modal run modal_app.py --action train                      # H100, full config
 modal run modal_app.py --action evaluate --artifact base   # zero-shot baseline only
 modal run modal_app.py --action train --overrides '{"target_format": "label"}'
 modal run modal_app.py --action sweep --sweep configs/sweeps/phase2.json   # parallel GPUs
+modal run modal_app.py --action train --overrides "$(cat configs/overrides/qwen3.8-27b.json)"
+modal run modal_app.py --action push --overrides '{"run_name": "sweep-rationale-seed42"}' \
+  --seed-runs sweep-rationale-seed1,sweep-rationale-seed2                 # publish to the Hub
 ```
 
 Each run prints a compact summary (test metrics with 95% intervals, baseline,
@@ -24,9 +27,9 @@ paired delta, best checkpoint) and writes the full report to
 `reports/modal/<run_name>.json` locally and to `reports/` on the volume. A sweep
 trains every variant on its own GPU at once and prints one comparison table.
 The zero-shot baseline is cached under `reports/baselines/` by every setting it
-depends on, so variants and reruns reuse it. The Modal app never pushes to the
-Hub; publishing stays an explicit step (`scripts/push_to_hub.py` or the
-notebook's last cell).
+depends on, so variants and reruns reuse it. Publishing is its own action: `push`
+uploads one run's adapter with a model card that includes the seed spread of the
+listed sibling runs.
 
 ## Modal Notebook Workflow
 
