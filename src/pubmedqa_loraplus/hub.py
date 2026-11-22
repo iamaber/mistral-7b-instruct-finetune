@@ -794,7 +794,7 @@ def push_artifact_to_hub(
     config: LoRAPlusConfig,
     artifact: str,
     source_dir: str | Path | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if artifact not in {"adapter", "merged"}:
         raise ValueError("artifact must be 'adapter' or 'merged'")
 
@@ -843,9 +843,13 @@ def push_artifact_to_hub(
         repo_type="model",
         allow_patterns=allow_patterns,
     )
+    # create_repo leaves an existing repo's visibility alone; apply the configured one
+    # after the upload so a repo never goes public with a stale card.
+    api.update_repo_settings(repo_id=repo_id, private=config.hub_private, repo_type="model")
 
     return {
         "artifact": artifact,
         "repo_id": repo_id,
         "source_dir": str(artifact_dir),
+        "private": config.hub_private,
     }
