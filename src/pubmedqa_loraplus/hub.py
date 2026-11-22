@@ -727,7 +727,7 @@ def push_artifact_to_hub(
 
     allow_patterns = ["README.md", "tokenizer*", "special_tokens_map.json", "chat_template.jinja"]
     if artifact == "adapter":
-        prepare_adapter_for_publish(artifact_dir, config.base_model_id)
+        prepare_adapter_for_publish(artifact_dir, config.base_model_id, config.base_model_revision)
         allow_patterns.extend(["adapter_config.json", "adapter_model.safetensors"])
     else:
         allow_patterns.extend(

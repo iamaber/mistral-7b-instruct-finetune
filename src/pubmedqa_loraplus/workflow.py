@@ -328,7 +328,9 @@ def train_model(config: LoRAPlusConfig) -> dict[str, Any]:
     config.tokenizer_output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(config.adapter_output_dir))
     tokenizer.save_pretrained(str(config.tokenizer_output_dir))
-    prepare_adapter_for_publish(config.adapter_output_dir, config.base_model_id)
+    prepare_adapter_for_publish(
+        config.adapter_output_dir, config.base_model_id, config.base_model_revision
+    )
 
     evaluation, predictions = run_evaluation_suite(
         trainer.model, tokenizer, dataset["test"], config
@@ -483,7 +485,9 @@ def export_artifacts(
 
     adapter_model.save_pretrained(str(config.adapter_output_dir))
     tokenizer.save_pretrained(str(config.tokenizer_output_dir))
-    prepare_adapter_for_publish(config.adapter_output_dir, config.base_model_id)
+    prepare_adapter_for_publish(
+        config.adapter_output_dir, config.base_model_id, config.base_model_revision
+    )
 
     merged_model = adapter_model.merge_and_unload()
     merged_model.save_pretrained(str(config.merged_output_dir))

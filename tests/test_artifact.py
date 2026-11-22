@@ -99,3 +99,17 @@ def test_prepare_adapter_for_publish_applies_both_fixups(write_json, tmp_path):
     assert result["removed_files"] == ["training_args.bin"]
     assert not (tmp_path / "training_args.bin").exists()
     assert json.loads(config_path.read_text())["base_model_name_or_path"] == HUB_ID
+
+
+def test_published_adapter_pins_the_base_revision_peft_loads(write_json, tmp_path):
+    from peft import PeftConfig
+
+    write_json(
+        "adapter_config.json", {"base_model_name_or_path": TRAINER_PATH, "peft_type": "LORA"}
+    )
+
+    prepare_adapter_for_publish(tmp_path, HUB_ID, "c170c708c41dac9275d15a8fff4eca08d52bab71")
+
+    loaded = PeftConfig.from_pretrained(str(tmp_path))
+    assert loaded.base_model_name_or_path == HUB_ID
+    assert loaded.revision == "c170c708c41dac9275d15a8fff4eca08d52bab71"

@@ -29,6 +29,7 @@ def is_hub_model_id(value: str) -> bool:
 def rewrite_base_model_reference(
     adapter_config_path: str | Path,
     base_model_id: str,
+    base_model_revision: str | None = None,
 ) -> dict[str, Any]:
     """Point ``base_model_name_or_path`` at the Hub id instead of a trainer path.
 
@@ -44,12 +45,15 @@ def rewrite_base_model_reference(
         raise FileNotFoundError(f"Adapter config not found: {path}")
     if not is_hub_model_id(base_model_id):
         raise ValueError(
-            "base_model_id must be a Hugging Face Hub id, not a local path: "
-            f"{base_model_id!r}"
+            f"base_model_id must be a Hugging Face Hub id, not a local path: {base_model_id!r}"
         )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["base_model_name_or_path"] = base_model_id
+    # PEFT loads the base at ``revision``; without it a consumer gets whatever the
+    # base repo's main branch holds at load time, not the weights this adapter fits.
+    if base_model_revision:
+        payload["revision"] = base_model_revision
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
 
@@ -75,10 +79,13 @@ def remove_trainer_sidecars(artifact_dir: str | Path) -> list[str]:
 def prepare_adapter_for_publish(
     artifact_dir: str | Path,
     base_model_id: str,
+    base_model_revision: str | None = None,
 ) -> dict[str, Any]:
     """Apply every publish-time fixup to an adapter directory."""
     directory = Path(artifact_dir)
-    config = rewrite_base_model_reference(directory / "adapter_config.json", base_model_id)
+    config = rewrite_base_model_reference(
+        directory / "adapter_config.json", base_model_id, base_model_revision
+    )
     removed = remove_trainer_sidecars(directory)
     return {
         "adapter_dir": str(directory),
