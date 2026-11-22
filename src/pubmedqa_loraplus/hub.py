@@ -81,7 +81,45 @@ def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
     ]
     if baseline.get("collapsed"):
         lines.extend(["> The base model's predictions were also a single label.", ""])
+    base_mmlu = evaluation.get("baseline", {}).get("mmlu_medical", {}).get("overall_accuracy")
+    tuned_mmlu = evaluation.get("mmlu_medical", {}).get("overall_accuracy")
+    if base_mmlu is not None and tuned_mmlu is not None:
+        lines.extend(
+            [
+                f"Medical MMLU: base model {_format_metric(base_mmlu)}, fine-tune "
+                f"{_format_metric(tuned_mmlu)}. MMLU is scored by the probability of the "
+                "option letter as the first reply token. A fine-tune that learned to open "
+                "with a written conclusion can lose that score from the format change "
+                "alone, so read a drop here as unresolved, not as proven forgetting.",
+                "",
+            ]
+        )
     return lines
+
+
+def _seed_section(report: dict[str, Any]) -> list[str]:
+    """Spread of the same configuration over training seeds, when recorded."""
+    runs = report.get("seed_summary", {}).get("runs")
+    if not runs:
+        return []
+    rows = [
+        f"| {run['seed']} | {_format_metric(run['accuracy'])} | {_format_metric(run['macro_f1'])} |"
+        for run in runs
+    ]
+    summary = report["seed_summary"]
+    return [
+        "### Seed variation",
+        "",
+        f"The same configuration trained with {len(runs)} seeds. This card's adapter is "
+        f"seed {report['seed_summary']['published_seed']}, chosen before seeing test scores.",
+        "",
+        "| Seed | Accuracy | Macro F1 |",
+        "| --- | --- | --- |",
+        *rows,
+        f"| mean ± sd | {summary['accuracy_mean']:.4f} ± {summary['accuracy_sd']:.4f} | "
+        f"{summary['macro_f1_mean']:.4f} ± {summary['macro_f1_sd']:.4f} |",
+        "",
+    ]
 
 
 def _confusion_matrix_table(
@@ -166,6 +204,7 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
         )
 
     lines.extend(_baseline_section(evaluation))
+    lines.extend(_seed_section(report))
 
     prediction_counts = pubmedqa.get("prediction_counts")
     if prediction_counts:
@@ -479,10 +518,14 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
     report = _load_report(config)
     library_name = "peft" if artifact == "adapter" else "transformers"
     repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
-    title = (
-        f"{config.run_name} (LoRA+ adapter)"
-        if artifact == "adapter"
-        else f"{config.run_name} (merged)"
+    name = repo_id.split("/")[-1] if repo_id else config.run_name
+    title = f"{name} (LoRA+ adapter)" if artifact == "adapter" else f"{name} (merged)"
+    purpose = (
+        "It is published for reproducibility and as a record of a negative result, not "
+        "as a model intended to be deployed."
+        if _pubmedqa_collapsed(report)
+        else "It is published for reproducibility with the evaluation below, not as a "
+        "model intended to be deployed."
     )
 
     lines: list[str] = [
@@ -516,13 +559,12 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         f"A LoRA+ fine-tune of `{config.base_model_id}` on "
         f"`{config.dataset_id}` / `{config.dataset_config}`, trained as a "
         "single-GPU research exercise to check the training and evaluation pipeline "
-        "end to end. It is published for reproducibility and as a record of a negative "
-        "result, not as a model intended to be deployed.",
+        f"end to end. {purpose}",
         "",
         "## Intended use",
         "",
-        "- Inspecting what a small LoRA+ run on PubMedQA's labeled pool does to a 7B "
-        "instruction-tuned model.",
+        "- Inspecting what a small LoRA+ run on PubMedQA's labeled pool does to an "
+        "instruction-tuned base model.",
         "- Reproducing the evaluation and extending it: whatever the run produced is "
         "recorded in the evaluation section, including an explicitly flagged collapse if "
         "the predictions were degenerate.",

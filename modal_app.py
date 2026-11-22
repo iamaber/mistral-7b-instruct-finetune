@@ -202,6 +202,46 @@ def evaluate(artifact: str, overrides_json: str) -> dict:
     return _summarize(report, report["report_path"])
 
 
+@app.function(image=image, timeout=60 * 60, volumes={VOLUME_ROOT: volume}, secrets=[huggingface])
+def push(overrides_json: str, seed_runs: list[str]) -> dict:
+    """Publish a trained adapter with a card that also shows its seed spread."""
+    import statistics
+
+    from src.pubmedqa_loraplus.hub import build_model_card, push_artifact_to_hub
+
+    config = _build_config(overrides_json)
+    volume.reload()
+    report = json.loads(config.report_path.read_text(encoding="utf-8"))
+    runs = []
+    for name in [config.run_name, *seed_runs]:
+        other = json.loads((config.reports_root / f"{name}.json").read_text(encoding="utf-8"))
+        snapshot = json.loads(
+            (config.reports_root / f"{name}_config.json").read_text(encoding="utf-8")
+        )
+        pubmedqa = other["evaluation"]["pubmedqa"]
+        runs.append(
+            {
+                "seed": snapshot["seed"],
+                "accuracy": pubmedqa["accuracy"],
+                "macro_f1": pubmedqa["macro_f1"],
+            }
+        )
+    if len(runs) > 1:
+        report["seed_summary"] = {
+            "published_seed": config.seed,
+            "runs": runs,
+            **{
+                f"{key}_{stat}": fn([run[key] for run in runs])
+                for key in ("accuracy", "macro_f1")
+                for stat, fn in (("mean", statistics.mean), ("sd", statistics.stdev))
+            },
+        }
+        config.report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    result = push_artifact_to_hub(config, "adapter")
+    volume.commit()
+    return {**result, "card": build_model_card(config, "adapter")}
+
+
 def _baseline_key(overrides: dict[str, Any]) -> str:
     from src.pubmedqa_loraplus.config import LoRAPlusConfig, baseline_cache_key
 
@@ -267,12 +307,21 @@ def main(
     gpu: str = "H100",
     artifact: str = "adapter",
     sweep: str = "configs/sweeps/phase2.json",
+    seed_runs: str = "",
 ) -> None:
     if action == "tests":
         run_tests.remote()
         return
     if action == "sweep":
         _run_sweep(sweep, gpu)
+        return
+    if action == "push":
+        names = [name for name in seed_runs.split(",") if name]
+        result = push.remote(overrides, names)
+        card_path = LOCAL_REPO / "reports" / "modal" / f"{result['repo_id'].split('/')[-1]}.md"
+        card_path.parent.mkdir(parents=True, exist_ok=True)
+        card_path.write_text(result.pop("card"), encoding="utf-8")
+        print(json.dumps({**result, "card": str(card_path)}, indent=2))
         return
     if action == "smoke":
         overrides = json.dumps({**SMOKE_OVERRIDES, **_parse_overrides(overrides)})
@@ -282,7 +331,7 @@ def main(
     elif action == "evaluate":
         result = evaluate.with_options(gpu=gpu).remote(artifact, overrides)
     else:
-        raise ValueError("action must be one of tests, train, evaluate, smoke, sweep")
+        raise ValueError("action must be one of tests, train, evaluate, smoke, sweep, push")
 
     stem = result["run_name"] if action != "evaluate" else f"{result['run_name']}_{artifact}_eval"
     _write_local_report(stem, result.pop("report"))
