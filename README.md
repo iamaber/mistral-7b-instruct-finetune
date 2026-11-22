@@ -1,10 +1,30 @@
 # PubMedQA LoRA+ Fine-Tuning on Modal
 
-This repository is a single-purpose LoRA+ fine-tuning workspace for `qiaojin/PubMedQA`, with a Modal-hosted notebook as the primary training interface. The notebook calls `train_model`, the same function `scripts/train.py` runs, then exports and publishes the artifacts. The Python scripts remain available as secondary helpers for automation and local fallback.
+This repository is a single-purpose LoRA+ fine-tuning workspace for `qiaojin/PubMedQA`. Training and tests run on Modal through [`modal_app.py`](modal_app.py), which calls `train_model`, the same function `scripts/train.py` and the notebook run. The notebook and the Python scripts remain available as secondary paths.
 
 The training path is explicitly non-quantized. The base model is loaded in full precision based on `model_dtype` from [`configs/loraplus_train.json`](configs/loraplus_train.json): `float32`, `float16`, `bfloat16`, or `auto`.
 
-## Primary Modal Workflow
+## Modal App (`modal run`)
+
+One command per job. The image installs `requirements.lock.txt`, the volume
+`pubmedqa-loraplus` caches the dataset, base models and runs, and the secret
+`huggingface-secret` must provide `HF_TOKEN` (the Mistral weights are gated).
+
+```bash
+modal run modal_app.py --action tests                      # CPU unit tests
+modal run modal_app.py --action smoke                      # L4, Qwen2.5-0.5B, 1 epoch
+modal run modal_app.py --action train                      # H100, full config
+modal run modal_app.py --action evaluate --artifact base   # zero-shot baseline only
+modal run modal_app.py --action train --overrides '{"target_format": "label"}'
+```
+
+Each run prints a compact summary (test metrics with 95% intervals, baseline,
+paired delta, best checkpoint) and writes the full report to
+`reports/modal/<run_name>.json` locally and to `reports/` on the volume. The
+Modal app never pushes to the Hub; publishing stays an explicit step
+(`scripts/push_to_hub.py` or the notebook's last cell).
+
+## Modal Notebook Workflow
 
 1. Start a Modal notebook on one strong GPU such as `A100`, `H100`, or `L40S`.
 2. Mount a persistent Modal Volume and expose it as `PUBMEDQA_MODAL_ROOT`.
@@ -88,6 +108,7 @@ Tracked files (`git ls-files`):
 ├── .gitignore
 ├── .python-version
 ├── LICENSE
+├── modal_app.py
 ├── README.md
 ├── pyproject.toml
 ├── requirements.lock.txt
