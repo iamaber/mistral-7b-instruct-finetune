@@ -1,320 +1,170 @@
-# PubMedQA LoRA+ Fine-Tuning on Modal
+# PubMedQA LoRA+ Fine-Tuning
 
-This repository is a single-purpose LoRA+ fine-tuning workspace for `qiaojin/PubMedQA`. Training and tests run on Modal through [`modal_app.py`](modal_app.py), which calls `train_model`, the same function `scripts/train.py` and the notebook run. The notebook and the Python scripts remain available as secondary paths.
+LoRA+ fine-tuning and evaluation for biomedical yes/no/maybe question answering on
+[PubMedQA](https://pubmedqa.github.io/). The model reads a PubMed abstract and a research
+question, writes a short conclusion, and answers `yes`, `no` or `maybe`.
 
-The training path is explicitly non-quantized. The base model is loaded in full precision based on `model_dtype` from [`configs/loraplus_train.json`](configs/loraplus_train.json): `float32`, `float16`, `bfloat16`, or `auto`.
+## Models
 
-## Modal App (`modal run`)
+| Model | PubMedQA accuracy | Macro-F1 | Base model zero-shot (acc / F1) |
+|---|---|---|---|
+| [iamaber/mistral-7b-pubmedqa-loraplus](https://huggingface.co/iamaber/mistral-7b-pubmedqa-loraplus) | 0.728 (3 seeds: 0.749 ± 0.023) | 0.583 (3 seeds: 0.584 ± 0.013) | 0.660 / 0.530 |
+| [iamaber/qwen3.8-27b-pubmedqa-loraplus](https://huggingface.co/iamaber/qwen3.8-27b-pubmedqa-loraplus) | 0.790 | 0.645 | 0.772 / 0.592 |
 
-One command per job. The image installs `requirements.lock.txt`, the volume
-`pubmedqa-loraplus` caches the dataset, base models and runs, and the secret
-`huggingface-secret` must provide `HF_TOKEN` (the Mistral weights are gated).
+All numbers are on PubMedQA's official 500-question test set, the same questions for the
+fine-tune and its base model. Each model card lists the paired 95% intervals, the per-seed
+results and medical MMLU before and after fine-tuning. These are research artifacts, not
+medical tools: do not use them for clinical decisions.
 
-```bash
-modal run modal_app.py --action tests                      # CPU unit tests
-modal run modal_app.py --action smoke                      # L4, Qwen2.5-0.5B, 1 epoch
-modal run modal_app.py --action train                      # H100, full config
-modal run modal_app.py --action evaluate --artifact base   # zero-shot baseline only
-modal run modal_app.py --action train --overrides '{"target_format": "label"}'
-modal run modal_app.py --action sweep --sweep configs/sweeps/phase2.json   # parallel GPUs
-modal run modal_app.py --action train --overrides "$(cat configs/overrides/qwen3.8-27b.json)"
-modal run modal_app.py --action push --overrides '{"run_name": "sweep-rationale-seed42"}' \
-  --seed-runs sweep-rationale-seed1,sweep-rationale-seed2                 # publish to the Hub
+### Use a published adapter
+
+```python
+import torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+base_id = "mistralai/Mistral-7B-Instruct-v0.3"
+tokenizer = AutoTokenizer.from_pretrained(base_id)
+model = AutoModelForCausalLM.from_pretrained(base_id, dtype=torch.bfloat16, device_map="auto")
+model = PeftModel.from_pretrained(model, "iamaber/mistral-7b-pubmedqa-loraplus").eval()
+
+prompt = (
+    "Context: <abstract text>\n\nQuestion: <question>\n\n"
+    "Write a short conclusion supported by the abstract, then give the final answer on its "
+    "own line as 'Answer: yes', 'Answer: no', or 'Answer: maybe'."
+)
+inputs = tokenizer.apply_chat_template(
+    [{"role": "user", "content": prompt}],
+    add_generation_prompt=True, return_tensors="pt", return_dict=True,
+).to(model.device)
+output = model.generate(**inputs, max_new_tokens=200, do_sample=False)
+print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-Each run prints a compact summary (test metrics with 95% intervals, baseline,
-paired delta, best checkpoint) and writes the full report to
-`reports/modal/<run_name>.json` locally and to `reports/` on the volume. A sweep
-trains every variant on its own GPU at once and prints one comparison table.
-The zero-shot baseline is cached under `reports/baselines/` by every setting it
-depends on, so variants and reruns reuse it. Publishing is its own action: `push`
-uploads one run's adapter with a model card that includes the seed spread of the
-listed sibling runs.
+For the Qwen3.8 adapter, use `Qwen/Qwen3.8-27B` as the base and pass
+`enable_thinking=False` to `apply_chat_template`.
 
-## Modal Notebook Workflow
+## How a run is trained
 
-1. Start a Modal notebook on one strong GPU such as `A100`, `H100`, or `L40S`.
-2. Mount a persistent Modal Volume and expose it as `PUBMEDQA_MODAL_ROOT`.
-3. Provide `HF_TOKEN` and optional `WANDB_API_KEY`, `ADAPTER_HUB_REPO_ID`, and `MERGED_HUB_REPO_ID`.
-4. Upload and run [`notebooks/pubmedqa_loraplus_notebook.ipynb`](notebooks/pubmedqa_loraplus_notebook.ipynb).
+- **Target.** With `target_format: "rationale"` (the default) the reply is PubMedQA's
+  `long_answer` conclusion followed by `Answer: <label>`. `"label"` trains on the decision
+  word alone; in the sweep it collapsed toward `yes`, as the first published run did.
+- **Loss.** Prompt tokens are masked, so only the reply is supervised.
+- **Class balance.** `balance_train_classes` oversamples `no` and `maybe` up to the `yes`
+  count. No example is dropped.
+- **Extra data.** `pqa_artificial_samples` adds a yes/no-balanced sample of PubMedQA's
+  `pqa_artificial` subset (0 by default; it did not help in the sweep).
+- **Adapter.** LoRA+ on every linear layer (`target_modules: "all-linear"`), rank 32,
+  alpha 64, learning rate 1e-4 with a LoRA+ ratio of 4.
+- **Checkpoint selection.** Every `eval_steps`, the validation questions are scored with the
+  same predictor as the test set, and the checkpoint with the best macro-F1 is kept. A
+  config whose run would end before its first evaluation is rejected.
+- **Prompts** come from the tokenizer's own chat template, so the same code trains Mistral,
+  Qwen2.5 and Qwen3.8. `chat_template_kwargs` passes template options such as
+  `{"enable_thinking": false}`.
 
-The notebook:
-- installs the pinned versions from `requirements.lock.txt` (exported from `uv.lock`)
-- downloads or reuses the cached dataset and base model on the Modal Volume, at
-  the revisions pinned in the config
-- calls `train_model`, which scores the untuned base model, trains the adapter,
-  and scores the adapter on PubMedQA's official 500-question test set and a
-  medical MMLU sample
-- logs the evaluation metrics to W&B when a run is active, and shows the adapter
-  metrics, the baseline metrics and the difference between them
-- exports adapter and merged model artifacts
-- pushes each artifact to Hugging Face when its repo id is set. The config sets
-  `adapter_hub_repo_id`, so the adapter push runs by default.
-  `ADAPTER_HUB_REPO_ID` and `MERGED_HUB_REPO_ID` override the config. A new repo
-  is created private unless `hub_private` is set to `false`.
+## How a run is evaluated
 
-## Volume Layout
+- **Test set.** PubMedQA's official 500 questions, selected by PMID from the ground truth
+  vendored in `src/pubmedqa_loraplus/pqal_test_ground_truth.json` (from
+  [pubmedqa/pubmedqa](https://github.com/pubmedqa/pubmedqa), MIT). Validation is a
+  label-stratified 10% of the other 500 questions; train is the rest. No question is in two
+  splits.
+- **Scoring.** A rationale run first writes its conclusion, then the log-probabilities of
+  `yes`, `no` and `maybe` are read at the token after `Answer:`. A prediction exists even when
+  the model never writes the answer line.
+- **Baseline.** The untuned base model is scored zero-shot on the same questions and prompt.
+  The report holds the fine-tune minus base difference with a paired bootstrap 95% interval.
+  Baselines are cached by every setting they depend on, including library versions.
+- **Uncertainty.** Accuracy and macro-F1 carry bootstrap 95% intervals.
+- **Collapse check.** The report lists predicted-label counts, the majority-class rate and a
+  `collapsed` flag.
+- **Medical MMLU.** 300 questions over six medical subjects, scored twice: the option letter
+  as the first reply token, and the letter after a short written rationale. A drop in both
+  means lost knowledge, not only a changed answer format.
+- **Per-question output.** `reports/<run_name>_predictions.jsonl` and
+  `reports/<run_name>_baseline_predictions.jsonl` hold the gold label, prediction,
+  log-probabilities and generated rationale for every test question.
 
-Inside the Modal Volume, the notebook uses a flat layout:
+## Reproduce
 
-- `base_model/`
-- `dataset/`
-- `runs/<run_name>/`
-- `reports/`
+Needs one GPU with enough memory for the base model in bf16. Both published adapters were
+trained on a single 80 GB H100; Mistral-7B should also fit on a 40 GB card.
 
-`reports/` holds `<run_name>.json` (the run report the model card reads), the
-per-example predictions for the adapter and the baseline, the config snapshot
-and the training log history. The rest of the layout keeps the persistent
-training state easy to inspect and resume.
+```bash
+uv sync --extra dev
+cp .env.example .env            # HF_TOKEN, optional W&B settings
 
-## Repository Layout
+uv run python scripts/prepare_assets.py
+uv run python scripts/evaluate.py --config configs/loraplus_train.json --artifact base
+uv run python scripts/train.py --config configs/loraplus_train.json
+uv run python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapter
+uv run python scripts/export_model.py --config configs/loraplus_train.json
+uv run python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
+```
 
-Tracked files (`git ls-files`):
+`train.py` runs the whole pipeline: baseline, training with checkpoint selection, test
+evaluation, and the run report in `reports/<run_name>.json`. `push_to_hub.py` uploads only
+model files and creates the repo private unless you pass `--public`.
+
+For Qwen3.8-27B, merge [`configs/overrides/qwen3.8-27b.json`](configs/overrides/qwen3.8-27b.json)
+into the config. [`configs/sweeps/phase2.json`](configs/sweeps/phase2.json) lists the
+variants compared in the sweep.
+
+[`notebooks/pubmedqa_loraplus_notebook.ipynb`](notebooks/pubmedqa_loraplus_notebook.ipynb)
+runs the same pipeline from a hosted GPU notebook with a persistent storage mount.
+
+## Configuration
+
+[`configs/loraplus_train.json`](configs/loraplus_train.json) holds every default.
+`base_model_revision`, `dataset_revision` and `mmlu_revision` pin the Hub commits a run loads,
+and published adapters record the base revision they were trained on. Publishing is private
+by default (`hub_private: true`).
+
+## Repository layout
 
 ```text
 .
 ├── configs/
-│   └── loraplus_train.json
-├── notebooks/
-│   └── pubmedqa_loraplus_notebook.ipynb
-├── scripts/
-│   ├── bootstrap.sh
-│   ├── evaluate.py
-│   ├── export_model.py
-│   ├── prepare_assets.py
-│   ├── push_to_hub.py
-│   └── train.py
-├── src/
-│   └── pubmedqa_loraplus/
-│       ├── __init__.py
-│       ├── artifact.py
-│       ├── config.py
-│       ├── data.py
-│       ├── env.py
-│       ├── evaluation.py
-│       ├── hub.py
-│       ├── paths.py
-│       ├── pqal_test_ground_truth.json
-│       ├── prompts.py
-│       ├── report.py
-│       ├── scoring.py
-│       ├── splits.py
-│       └── workflow.py
-├── tests/
-│   ├── _stubs.py
-│   ├── conftest.py
-│   ├── test_aggregation.py
-│   ├── test_artifact.py
-│   ├── test_data.py
-│   ├── test_model_card.py
-│   ├── test_prompts.py
-│   ├── test_report.py
-│   ├── test_scoring.py
-│   └── test_splits.py
-├── .env.example
-├── .gitignore
-├── .python-version
-├── LICENSE
-├── modal_app.py
-├── README.md
-├── pyproject.toml
-├── requirements.lock.txt
-├── requirements.txt
-└── uv.lock
+│   ├── loraplus_train.json
+│   ├── overrides/qwen3.8-27b.json
+│   └── sweeps/phase2.json
+├── notebooks/pubmedqa_loraplus_notebook.ipynb
+├── scripts/                 # prepare_assets, train, evaluate, export_model, push_to_hub
+├── src/pubmedqa_loraplus/
+│   ├── config.py            # run config and schedule checks
+│   ├── data.py              # official split, tokenisation, class balancing
+│   ├── evaluation.py        # PubMedQA and medical MMLU scoring
+│   ├── hub.py               # model card and Hub upload
+│   ├── prompts.py           # chat-template prompts and decision tokens
+│   ├── scoring.py           # metrics and bootstrap intervals
+│   ├── splits.py            # split and sampling plans
+│   ├── workflow.py          # training, evaluation and export
+│   └── pqal_test_ground_truth.json
+└── tests/                   # CPU-only unit tests
 ```
 
-Generated at runtime and gitignored: `data/` (dataset cache), `models/`
-(base model and run output) and `reports/` (run reports).
-
-## Shared Config
-
-[`configs/loraplus_train.json`](configs/loraplus_train.json) is the single source of training defaults. The notebook stops with an error if the file is missing. It reads the file, applies environment overrides, then rewrites runtime paths to the mounted Modal Volume.
-
-`base_model_revision`, `dataset_revision` and `mmlu_revision` pin the Hub
-commits a run loads, so a rerun sees the same weights and data. A
-`BASE_MODEL_ID` override in the notebook drops the pinned base revision unless
-`BASE_MODEL_REVISION` is also set.
-
-Prompts go through the tokenizer's own chat template, so no prompt string is
-tied to Mistral. `chat_template_kwargs` passes options to that template, for
-example `{"enable_thinking": false}` for a model whose template supports it.
-`target_format` picks the training target, described under Training Objective.
-
-`train_model` refuses a config whose run would end before its first evaluation,
-because checkpoint selection would then never run.
-
-The only Modal-specific field in the config is `modal_mount_root`: the
-notebook reads it as the default mount point for the volume. GPU type,
-timeout, secret name and image name belong to the Modal app definition that
-launches the notebook, so they are not part of the training config.
-
-Publishing is **private by default** (`hub_private: true`). Making a Hub repo
-public is an explicit choice: pass `--public` to `scripts/push_to_hub.py`.
-
-The notebook accepts these environment overrides. An empty variable counts as
-unset, so the config value applies.
-
-- `RUN_NAME`
-- `BASE_MODEL_ID`, `BASE_MODEL_REVISION`
-- `MODEL_DTYPE`
-- `TRAIN_BATCH_SIZE`, `EVAL_BATCH_SIZE`, `GRADIENT_ACCUMULATION_STEPS`
-- `LEARNING_RATE`, `LORAPLUS_LR_RATIO`, `LORAPLUS_LR_EMBEDDING`
-- `NUM_EPOCHS`, `LOGGING_STEPS`, `SAVE_STEPS`, `EVAL_STEPS`
-- `MAX_LENGTH`, `MMLU_EVAL_SAMPLES`
-- `WANDB_PROJECT`
-- `ADAPTER_HUB_REPO_ID`, `MERGED_HUB_REPO_ID`
-- `PUBMEDQA_MODAL_ROOT`
-
-## Training Objective
-
-The loss covers the assistant reply only. Prompt tokens are masked in the labels.
-`target_format` sets what the reply is:
-
-- `rationale` (the default) trains on the PubMedQA `long_answer` conclusion,
-  followed by a line `Answer: <label>`.
-- `label` trains on the decision word alone.
-
-`balance_train_classes` oversamples each minority label up to the size of the
-largest one. No original example is dropped.
-
-`pqa_artificial_samples` adds a yes/no-balanced sample of PubMedQA's
-`pqa_artificial` subset to the train split before balancing. It is 0 by
-default. That subset has no `maybe` label, and any question in validation or
-test is excluded from the sample.
-
-## Evaluation Notes
-
-### How a run is scored
-
-- The test split is PubMedQA's official 500-question set. `load_pubmedqa`
-  selects it by PMID from the ground truth vendored in
-  `src/pubmedqa_loraplus/pqal_test_ground_truth.json` (from
-  [pubmedqa/pubmedqa](https://github.com/pubmedqa/pubmedqa), MIT). It fails if
-  a PMID is missing or a label disagrees. The numbers are comparable with
-  published PubMedQA results.
-- Validation is a label-stratified `validation_size` (10%) of the other 500
-  questions. Train is the rest, about 450 questions. No question is in two
-  splits.
-- The evaluator scores a decision as one token. It reads the log-probability
-  of `yes`, `no` and `maybe` at the position right after the prompt and takes
-  the highest. A `rationale` run first generates its conclusion greedily, up to
-  `rationale_max_new_tokens`, then scores the token after `Answer:`. A
-  prediction exists even when the model never writes `Answer:`. Medical MMLU
-  uses the same scoring over `A` to `D`.
-- Every `eval_steps`, the trainer scores the validation questions with the same
-  predictor. It keeps the checkpoint with the best macro-F1.
-- With `evaluate_base_model` on, `train_model` first scores the base model
-  zero-shot, with the adapter disabled, on the same test questions and prompt.
-  The report stores this under `evaluation.baseline`.
-  `evaluation.delta_vs_baseline` holds the fine-tune minus base difference in
-  accuracy and macro-F1, each with a paired bootstrap 95% interval.
-- Accuracy and macro-F1 carry percentile bootstrap 95% intervals over
-  `bootstrap_samples` resamples.
-- The report lists the predicted-label counts, the majority-class rate and a
-  `collapsed` flag, so a predictor that always answers the same label is
-  visible.
-- `reports/<run_name>_predictions.jsonl` and
-  `reports/<run_name>_baseline_predictions.jsonl` hold one record per test
-  question: PMID, gold label, prediction, the three log-probabilities, a tie
-  flag and the generated rationale.
-- The medical MMLU budget (`mmlu_eval_samples`) is split evenly across six
-  medical subjects. The report warns about any subject with no samples.
-
-The card generator in [`hub.py`](src/pubmedqa_loraplus/hub.py) renders the
-baseline comparison and these warnings into the model card.
-
-### The published run is stale
-
-The adapter published at `iamaber/mistral-7b-pubmedqa-loraplus` predates
-everything above. Its model card is stale until a new run is pushed. That run
-used a hand-built Mistral prompt, label-only targets, no class balancing and
-100 questions from a random split instead of the official test set. It planned
-about 150 optimizer steps against `eval_steps=200`, so it never evaluated on
-validation and kept its last step. Its reported numbers have these problems:
-
-- **PubMedQA collapsed.** Every one of the 100 predictions was `yes`, so the
-  reported accuracy of 0.4500 equals the majority-class rate of that split
-  (45 `yes` / 40 `no` / 15 `maybe`), and macro F1 (0.2069) is what an all-`yes`
-  predictor scores. The cause of the collapse is **not established**. It was
-  not reproduced here, and no model was loaded to check it.
-- **The medical MMLU figure covered one subject.** The sample budget took the
-  first 50 rows of a subject-filtered `cais/mmlu` split. Those rows are all
-  `anatomy` (measured against the dataset revision of the time), which is why
-  the other medical subjects show 0 samples.
-- **The metrics were computed once and copied to both cards.** They describe
-  the adapter run, not each repository separately.
-
-The prompt, split and scoring code behind those numbers are gone from this
-repository, so a new run is not comparable with them.
+`data/`, `models/` and `reports/` are generated at runtime and gitignored.
 
 ## Tests
-
-The scoring, splitting, prompt, aggregation and card-generation logic is
-covered by CPU-only unit tests that do not load a model:
 
 ```bash
 uv run --extra dev pytest
 ```
 
-The suite needs the `dev` extra and the project dependencies. The tests import
-the package, which imports `torch`, and `tests/test_splits.py` builds small
-`datasets` objects. `pytest` alone also works inside a virtualenv with the
-project and its `dev` extra installed.
+The tests run on CPU without downloading a model. CI also checks that `uv.lock` and
+`requirements.lock.txt` agree and runs ruff.
 
-## Local Setup
+## History
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-```
-
-For a reproducible environment that matches `uv.lock`, use
-`uv sync --extra dev` (or install the pinned export,
-`pip install -r requirements.lock.txt`).
-
-The training pipeline uses Transformers v5, including its text-only causal LM
-loader for supported multimodal checkpoints such as Qwen3.8-27B.
-
-Environment variables live in `.env`; copy the tracked template first:
-
-```bash
-cp .env.example .env
-```
-
-## Notebook
-
-Use [notebooks/pubmedqa_loraplus_notebook.ipynb](notebooks/pubmedqa_loraplus_notebook.ipynb). It is Modal-first:
-
-- no Kaggle assumptions
-- no subprocess call into `scripts/train.py`
-- no fixed two-GPU requirement
-- LoRA+ training through `train_model` on a single strong GPU
-- persistence through the mounted Modal Volume
-
-## Secondary Helpers
-
-The scripts are still available for automation and local fallback, but they are no longer the primary documented path:
-
-```bash
-. .venv/bin/activate
-python scripts/prepare_assets.py
-python scripts/train.py --config configs/loraplus_train.json
-python scripts/evaluate.py --config configs/loraplus_train.json --artifact adapter
-python scripts/evaluate.py --config configs/loraplus_train.json --artifact base
-python scripts/export_model.py --config configs/loraplus_train.json
-python scripts/push_to_hub.py --config configs/loraplus_train.json --artifact adapter
-```
-
-`push_to_hub.py` creates the Hub repo **private** unless you pass `--public`.
-The adapter and merged model directories must exist locally (the notebook
-writes them under the Modal Volume's `runs/<run_name>/`).
+The first published adapter (Mistral-7B, label-only targets, a hand-built prompt and 100
+questions from a random split) answered `yes` to every question: accuracy 0.45, the
+majority-class rate of that split. Its checkpoint selection never ran because training ended
+before the first evaluation. The current pipeline was rebuilt to make that failure
+impossible to miss, and the published adapters were retrained with it.
 
 ## License
 
-Copyright (c) 2025 iamaber
-
-This project is released under the Apache License 2.0; see [LICENSE](LICENSE)
-for the full terms. This matches the two published PubMedQA model cards and
-the Apache-2.0 Mistral base model. Third-party models and datasets retain
-their own terms.
+Copyright (c) 2025 iamaber. Apache License 2.0; see [LICENSE](LICENSE). Base models and
+datasets keep their own licences: Mistral-7B-Instruct-v0.3 and Qwen3.8-27B are Apache-2.0,
+PubMedQA is MIT.
