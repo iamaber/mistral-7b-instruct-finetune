@@ -88,6 +88,8 @@ def _hub_revision(config: LoRAPlusConfig) -> str | None:
 
 
 def load_base_model(config: LoRAPlusConfig) -> Any:
+    # The causal LM auto class can select a VLM checkpoint's text-only model
+    # when Transformers registers that architecture for causal LM loading.
     model = AutoModelForCausalLM.from_pretrained(
         config.base_model_source,
         dtype=resolve_model_dtype(config),
@@ -189,10 +191,10 @@ def build_training_arguments(config: LoRAPlusConfig) -> TrainingArguments:
         eval_steps=config.eval_steps,
         fp16=torch.cuda.is_available() and _uses_float16(config),
         bf16=torch.cuda.is_available() and _uses_bfloat16(config),
-        gradient_checkpointing=True,
+        activation_checkpointing=True,
         # Reentrant checkpointing drops the graph when the frozen embeddings output
         # no grad, so the LoRA weights would never receive a gradient.
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        activation_checkpointing_kwargs={"use_reentrant": False},
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
         label_names=["labels"],
@@ -200,14 +202,14 @@ def build_training_arguments(config: LoRAPlusConfig) -> TrainingArguments:
         metric_for_best_model="macro_f1",
         greater_is_better=True,
         save_total_limit=2,
-        warmup_ratio=config.warmup_ratio,
+        # A float below 1 is a fraction of total steps (Transformers v5 has no warmup_ratio).
+        warmup_steps=config.warmup_ratio,
         weight_decay=config.weight_decay,
         lr_scheduler_type=config.lr_scheduler_type,
-        group_by_length=config.group_by_length,
+        train_sampling_strategy="group_by_length" if config.group_by_length else "random",
         max_grad_norm=config.max_grad_norm,
         report_to=report_to,
         run_name=run_name if report_to else None,
-        save_safetensors=True,
     )
 
 

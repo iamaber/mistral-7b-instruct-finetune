@@ -270,9 +270,8 @@ For a reproducible environment that matches `uv.lock`, use
 `uv sync --extra dev` (or install the pinned export,
 `pip install -r requirements.lock.txt`).
 
-`transformers` is capped below 5. Version 5 removed the `warmup_ratio` and
-`safe_serialization` arguments this code relies on, and that migration belongs
-with a future base-model swap.
+The training pipeline uses Transformers v5, including its text-only causal LM
+loader for supported multimodal checkpoints such as Qwen3.8-27B.
 
 Environment variables live in `.env`; copy the tracked template first:
 

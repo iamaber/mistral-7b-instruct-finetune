@@ -1,16 +1,16 @@
 # Core ML libraries
-torch>=2.0.0
-transformers>=4.56.0,<5
+torch>=2.6.0
+transformers>=5.24.0,<6
 datasets>=2.14.0
-peft>=0.9.0
+peft>=0.22.0
 
 # Data processing and evaluation
 numpy>=1.24.0
 tqdm>=4.65.0
 
 # Hugging Face integration
-huggingface_hub>=0.17.0
-accelerate>=0.24.0
+huggingface_hub>=1.31.0,<3
+accelerate>=1.1.0
 sentencepiece>=0.1.99
 
 # Experiment tracking

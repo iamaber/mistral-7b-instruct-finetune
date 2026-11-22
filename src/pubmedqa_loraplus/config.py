@@ -91,6 +91,8 @@ class LoRAPlusConfig:
             raise ValueError(f"target_format must be one of {list(TARGET_FORMATS)}")
         if not 0.0 < self.validation_size < 1.0:
             raise ValueError("validation_size must be between 0 and 1")
+        if not 0.0 <= self.warmup_ratio < 1.0:
+            raise ValueError("warmup_ratio must be in [0, 1)")
         if self.pqa_artificial_samples < 0:
             raise ValueError("pqa_artificial_samples must be >= 0")
         if self.resume_from_checkpoint is not None:

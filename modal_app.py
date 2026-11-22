@@ -163,6 +163,8 @@ def run_tests() -> str:
     image=image,
     gpu=DEFAULT_GPU,
     timeout=6 * 60 * 60,
+    # Room to stage a ~55 GB checkpoint on the host before it moves to the GPU.
+    memory=96 * 1024,
     volumes={VOLUME_ROOT: volume},
     secrets=[huggingface],
 )
@@ -183,6 +185,7 @@ def train(overrides_json: str) -> dict:
     image=image,
     gpu=DEFAULT_GPU,
     timeout=6 * 60 * 60,
+    memory=96 * 1024,
     volumes={VOLUME_ROOT: volume},
     secrets=[huggingface],
 )
