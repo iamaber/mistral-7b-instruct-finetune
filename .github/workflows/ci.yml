@@ -21,7 +21,7 @@ jobs:
 
       - name: Verify requirements.lock.txt matches the lockfile
         run: |
-          uv export --frozen --no-hashes --no-emit-project --no-dev \
+          uv export --frozen --no-hashes --no-header --no-emit-project --no-dev \
             -o /tmp/requirements.lock.txt
           diff -u requirements.lock.txt /tmp/requirements.lock.txt
 
