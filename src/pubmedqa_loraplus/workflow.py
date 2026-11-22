@@ -179,7 +179,10 @@ def build_training_arguments(config: LoRAPlusConfig) -> TrainingArguments:
         seed=config.seed,
         data_seed=config.seed,
         per_device_train_batch_size=config.train_batch_size,
-        per_device_eval_batch_size=config.eval_batch_size,
+        # eval_batch_size sizes the generation predictor; the token-loss pass holds
+        # full-vocabulary logits, so it uses the training micro-batch and keeps none.
+        per_device_eval_batch_size=config.train_batch_size,
+        prediction_loss_only=True,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_epochs,
