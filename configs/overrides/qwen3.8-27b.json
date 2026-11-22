@@ -1,0 +1,9 @@
+{
+  "run_name": "qwen3.8-27b-rationale",
+  "base_model_id": "Qwen/Qwen3.8-27B",
+  "base_model_revision": "37561816e66b5b9153b1b64c10968c18c1e6f4a0",
+  "chat_template_kwargs": {"enable_thinking": false},
+  "train_batch_size": 1,
+  "gradient_accumulation_steps": 16,
+  "eval_batch_size": 4
+}

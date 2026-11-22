@@ -1,96 +1,81 @@
-"""CPU-only tests for prompt formatting and token budgeting.
+"""CPU-only tests for chat-template prompts and decision-token scoring.
 
-Left-slicing a joined prompt drops the ``Question: ... [/INST]`` suffix once
-the abstract exceeds the budget. That did not happen on the published run (its
-longest of 100 prompts was 688 tokens against a 1024 budget), but the guard is
-what keeps the instruction suffix intact for longer inputs.
+The old pipeline hand-built ``<s>[INST] ...`` strings, which silently produce
+the wrong format for any other base model. These tests pin that the template
+comes from the tokenizer and that the scored token is the one training
+supervises.
 """
 
 import pytest
+from _stubs import CHATML, MISTRAL_V3, StubTokenizer
 
 from src.pubmedqa_loraplus.prompts import (
-    build_answer_text,
-    build_instruction_prompt,
-    fit_prompt_ids,
+    ANSWER_MARKER,
+    ChatFormat,
+    build_completion_content,
+    build_user_message,
+    choice_token_ids,
+    extract_rationale,
 )
+from src.pubmedqa_loraplus.scoring import PUBMEDQA_LABELS
 
 
-class StubTokenizer:
-    """Character-level tokenizer: one token per character, ids are ordinals."""
+@pytest.mark.parametrize(
+    ("template", "prefix", "suffix"),
+    [(MISTRAL_V3, " ", "</s>"), (CHATML, "", "<|im_end|>\n")],
+)
+def test_chat_format_recovers_the_assistant_wrapper_from_the_template(template, prefix, suffix):
+    chat_format = ChatFormat.from_tokenizer(StubTokenizer(template))
 
-    bos_token = "<s>"
-    eos_token = "</s>"
-
-    def __call__(self, text, add_special_tokens=False):
-        return {"input_ids": [ord(character) for character in text]}
-
-
-def _decode(ids):
-    return "".join(chr(token_id) for token_id in ids)
+    assert chat_format.completion_prefix == prefix
+    assert chat_format.completion_suffix == suffix
 
 
-def test_instruction_prompt_keeps_mistral_markers():
-    prompt = build_instruction_prompt("Does X help?", "Some context.", "<s>")
+def test_chatml_prompt_carries_no_mistral_markers():
+    tokenizer = StubTokenizer(CHATML)
+    chat_format = ChatFormat.from_tokenizer(tokenizer)
 
-    assert prompt.startswith("<s>[INST] Context: ")
-    assert "Question: Does X help? [/INST]" in prompt
+    prompt = chat_format.render_prompt(tokenizer, build_user_message("Q?", "ctx", "label"))
 
-
-def test_answer_text_is_space_prefixed_and_lowercase():
-    assert build_answer_text("YES") == " yes</s>"
-
-
-def test_fit_prompt_ids_keeps_head_and_tail_when_context_overflows():
-    head = [1, 2]
-    context = list(range(10, 30))
-    tail = [40, 41, 42]
-
-    fitted = fit_prompt_ids(head, context, tail, budget=10)
-
-    assert len(fitted) == 10
-    assert fitted[: len(head)] == head
-    assert fitted[-len(tail) :] == tail
+    assert "[INST]" not in prompt and "<s>" not in prompt
+    assert prompt.endswith("<|im_start|>assistant\n")
 
 
-def test_fit_prompt_ids_drops_context_from_the_left_first():
-    fitted = fit_prompt_ids([1], [10, 11, 12, 13], [20], budget=4)
+@pytest.mark.parametrize("template", [MISTRAL_V3, CHATML])
+@pytest.mark.parametrize("target_format", ["label", "rationale"])
+@pytest.mark.parametrize("decision", PUBMEDQA_LABELS)
+def test_scored_decision_token_is_the_token_training_supervises(template, target_format, decision):
+    tokenizer = StubTokenizer(template)
+    chat_format = ChatFormat.from_tokenizer(tokenizer)
+    rationale = "Treatment X reduced Y in adults."
+    content = build_completion_content(decision, rationale, target_format)
+    trained = tokenizer(chat_format.completion_text(content))["input_ids"]
 
-    # 1 head + 2 context + 1 tail, context trimmed from the left.
-    assert fitted == [1, 12, 13, 20]
+    lead_text = chat_format.completion_prefix
+    if target_format == "rationale":
+        lead_text += f"{rationale}\n{ANSWER_MARKER} "
+    lead_ids, choice_ids = choice_token_ids(tokenizer, lead_text, PUBMEDQA_LABELS)
+
+    assert trained[: len(lead_ids)] == lead_ids
+    assert trained[len(lead_ids)] == choice_ids[decision]
 
 
-def test_fit_prompt_ids_preserves_tail_when_budget_smaller_than_tail():
-    fitted = fit_prompt_ids([1, 2], [3, 4], [5, 6, 7], budget=2)
-
-    assert fitted == [6, 7]
-
-
-def test_fit_prompt_ids_rejects_non_positive_budget():
-    with pytest.raises(ValueError):
-        fit_prompt_ids([1], [2], [3], budget=0)
-
-
-def test_joined_prompt_truncation_would_drop_the_question():
-    """Regression guard: document why the old left-slice was wrong.
-
-    Slicing the joined prompt to the last N tokens is fine, but slicing it to
-    the *first* N tokens — which is what the old code did — removes the
-    question and the [/INST] marker entirely once the abstract is long.
-    """
+def test_choice_tokens_must_be_distinct():
     tokenizer = StubTokenizer()
-    long_context = "x" * 500
-    prompt = build_instruction_prompt("Does X help?", long_context, "<s>")
-    joined = tokenizer(prompt)["input_ids"]
-    budget = 40
 
-    left_slice = joined[:budget]
-    assert "Question:" not in _decode(left_slice)
+    with pytest.raises(ValueError):
+        choice_token_ids(tokenizer, " ", ("yes", "yes"))
 
-    # The replacement keeps the instruction suffix.
-    head = tokenizer("<s>[INST] Context: ")["input_ids"]
-    context = tokenizer(long_context)["input_ids"]
-    tail = tokenizer("\n\nQuestion: Does X help? [/INST]")["input_ids"]
-    fitted = fit_prompt_ids(head, context, tail, budget)
 
-    assert len(fitted) <= budget
-    assert "Question: Does X help? [/INST]" in _decode(fitted)
+def test_rationale_target_requires_a_long_answer():
+    with pytest.raises(ValueError):
+        build_completion_content("yes", "  ", "rationale")
+
+
+def test_label_target_is_the_lowercased_decision():
+    assert build_completion_content("Maybe", None, "label") == "maybe"
+
+
+def test_extract_rationale_stops_at_the_answer_marker():
+    assert extract_rationale("It helps.\nAnswer: yes") == "It helps."
+    assert extract_rationale("No marker at all ") == "No marker at all"

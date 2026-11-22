@@ -24,7 +24,9 @@ def download_dataset(config: LoRAPlusConfig) -> None:
         return
 
     config.dataset_disk_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset = load_dataset(config.dataset_id, config.dataset_config)
+    dataset = load_dataset(
+        config.dataset_id, config.dataset_config, revision=config.dataset_revision
+    )
     dataset.save_to_disk(str(config.dataset_disk_path))
     LOGGER.info("Saved dataset to %s", config.dataset_disk_path)
 
@@ -37,6 +39,7 @@ def download_model(config: LoRAPlusConfig) -> None:
     config.base_model_path.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=config.base_model_id,
+        revision=config.base_model_revision,
         local_dir=str(config.base_model_path),
         token=os.getenv(config.hub_token_env) or None,
     )

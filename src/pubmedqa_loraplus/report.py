@@ -1,11 +1,12 @@
 """The single run-report schema consumed by the model-card generator.
 
-There are three producers (``train_model``, the Modal notebook, and
-``evaluate_artifact``) and one consumer (``hub.build_model_card``). When the
-notebook wrote its training metadata to ``<run>_training.json`` while the card
-read ``<run>.json``, the card's "Reported run details" table silently rendered
-``not available`` for every row on the primary path. Building the payload in
-one place keeps the producer and consumer from drifting apart again.
+There are two producers (``train_model`` and ``evaluate_artifact``) and one
+consumer (``hub.build_model_card``). The Modal notebook calls ``train_model``.
+When the notebook built its own payload and wrote its training metadata to
+``<run>_training.json`` while the card read ``<run>.json``, the card's
+"Reported run details" table silently rendered ``not available`` for every
+row on the primary path. Building the payload in one place keeps the producer
+and consumer from drifting apart again.
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ REPORT_FIELDS = (
     "dataset_id",
     "dataset_config",
     "dataset_disk_path",
+    "test_split",
     "train_examples",
+    "labeled_train_examples",
     "validation_examples",
     "eval_examples",
     "training",
@@ -47,7 +50,9 @@ def build_run_report(
     dataset_config: str | None = None,
     dataset_disk_path: str | None = None,
     base_model_source: str | None = None,
+    test_split: str | None = None,
     train_examples: int | None = None,
+    labeled_train_examples: int | None = None,
     validation_examples: int | None = None,
     eval_examples: int | None = None,
     artifacts: Mapping[str, Any] | None = None,
@@ -60,7 +65,9 @@ def build_run_report(
         "dataset_id": dataset_id,
         "dataset_config": dataset_config,
         "dataset_disk_path": dataset_disk_path,
+        "test_split": test_split,
         "train_examples": train_examples,
+        "labeled_train_examples": labeled_train_examples,
         "validation_examples": validation_examples,
         "eval_examples": eval_examples,
         "training": dict(training),

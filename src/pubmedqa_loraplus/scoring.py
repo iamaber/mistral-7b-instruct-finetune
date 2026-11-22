@@ -6,64 +6,11 @@ metric computation can be unit-tested on CPU without loading a model.
 
 from __future__ import annotations
 
+import random
 from collections import Counter
 from typing import Callable, Iterable, Mapping, Sequence
 
 PUBMEDQA_LABELS = ("yes", "no", "maybe")
-
-
-def score_candidate(
-    prompt_length: int,
-    candidate_ids: Sequence[int],
-    log_prob_at: Callable[[int, int], float],
-) -> float:
-    """Sum the log-probability of every candidate token, given its own logits.
-
-    A causal LM's logits at position ``i`` predict the token at position
-    ``i + 1``. The first candidate token therefore has to be scored with the
-    logits at ``prompt_length - 1`` (the last prompt position). Indexing from
-    ``prompt_length`` instead never reads the position that predicts the first
-    answer token, so the only logit carrying the label decision is skipped:
-    for ``" yes</s>"`` / ``" no</s>"`` / ``" maybe</s>"`` the position that
-    predicts ``yes`` / ``no`` / ``maybe`` is never consulted.
-    """
-    if prompt_length < 1:
-        raise ValueError("prompt_length must be >= 1")
-    if not candidate_ids:
-        raise ValueError("candidate_ids must not be empty")
-
-    total = 0.0
-    for offset, token_id in enumerate(candidate_ids):
-        total += log_prob_at(prompt_length + offset - 1, token_id)
-    return total
-
-
-def normalise_candidate_scores(
-    raw_scores: Mapping[str, float],
-    candidate_token_counts: Mapping[str, int],
-) -> dict[str, float]:
-    """Convert summed log-probabilities into per-token average log-probabilities.
-
-    Summing log-probabilities prefers shorter candidates when the candidates
-    have different token counts, because every extra token adds another
-    negative term. Averaging removes that bias.
-
-    The published PubMedQA candidates were ``" yes</s>"``, ``" no</s>"`` and
-    ``" maybe</s>"``; each is two tokens, so this bias did not contribute to
-    that particular collapse. It is fixed regardless because labels such as
-    ``" maybe"`` split differently with other tokenizers, and the MMLU
-    candidates are scored by the same function.
-    """
-    if set(raw_scores) != set(candidate_token_counts):
-        raise ValueError("raw_scores and candidate_token_counts must have identical keys")
-
-    normalised: dict[str, float] = {}
-    for label, total in raw_scores.items():
-        count = candidate_token_counts[label]
-        if count <= 0:
-            raise ValueError(f"candidate {label!r} has no scorable tokens")
-        normalised[label] = total / count
-    return normalised
 
 
 def choose_label(
@@ -111,9 +58,7 @@ def accuracy(references: Sequence[str], predictions: Sequence[str]) -> float:
     if len(references) != len(predictions):
         raise ValueError("references and predictions must have the same length")
     correct = sum(
-        1
-        for reference, prediction in zip(references, predictions)
-        if reference == prediction
+        1 for reference, prediction in zip(references, predictions) if reference == prediction
     )
     return correct / len(references)
 
@@ -141,11 +86,7 @@ def _per_label_f1(
             if (true_positive + false_negative)
             else 0.0
         )
-        f1 = (
-            2 * precision * recall / (precision + recall)
-            if (precision + recall)
-            else 0.0
-        )
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
         results[label] = (precision, recall, f1, support)
     return results
 
@@ -206,6 +147,79 @@ def is_collapsed(
     """True when the predictor emitted only one distinct label."""
     counts = prediction_counts(predictions, labels)
     return sum(1 for value in counts.values() if value > 0) <= 1
+
+
+def macro_f1_score(references: Sequence[str], predictions: Sequence[str]) -> float:
+    return macro_f1(confusion_matrix_counts(references, predictions))
+
+
+def max_prediction_share(predictions: Sequence[str]) -> float:
+    """Share of the most frequent predicted label; near 1.0 means near-collapse."""
+    if not predictions:
+        return 0.0
+    return max(Counter(predictions).values()) / len(predictions)
+
+
+Metric = Callable[[Sequence[str], Sequence[str]], float]
+
+
+def _percentile_interval(values: list[float], alpha: float) -> list[float]:
+    ordered = sorted(values)
+    low = ordered[int((alpha / 2) * (len(ordered) - 1))]
+    high = ordered[int((1 - alpha / 2) * (len(ordered) - 1))]
+    return [low, high]
+
+
+def bootstrap_interval(
+    references: Sequence[str],
+    predictions: Sequence[str],
+    metric: Metric,
+    samples: int,
+    seed: int,
+    alpha: float = 0.05,
+) -> list[float]:
+    """Percentile bootstrap interval of ``metric`` over resampled examples."""
+    if samples < 1 or not references:
+        raise ValueError("bootstrap needs at least one sample and one example")
+    rng = random.Random(seed)
+    size = len(references)
+    values = []
+    for _ in range(samples):
+        rows = [rng.randrange(size) for _ in range(size)]
+        values.append(metric([references[i] for i in rows], [predictions[i] for i in rows]))
+    return _percentile_interval(values, alpha)
+
+
+def paired_bootstrap_delta(
+    references: Sequence[str],
+    candidate: Sequence[str],
+    baseline: Sequence[str],
+    metric: Metric,
+    samples: int,
+    seed: int,
+    alpha: float = 0.05,
+) -> dict[str, float | list[float]]:
+    """``metric(candidate) - metric(baseline)`` with a paired bootstrap interval.
+
+    Both predictors are resampled on the same rows, so the interval reflects the
+    difference on shared questions rather than two independent noise bands.
+    """
+    if samples < 1 or not references:
+        raise ValueError("bootstrap needs at least one sample and one example")
+    rng = random.Random(seed)
+    size = len(references)
+    values = []
+    for _ in range(samples):
+        rows = [rng.randrange(size) for _ in range(size)]
+        sampled = [references[i] for i in rows]
+        values.append(
+            metric(sampled, [candidate[i] for i in rows])
+            - metric(sampled, [baseline[i] for i in rows])
+        )
+    return {
+        "delta": metric(references, candidate) - metric(references, baseline),
+        "interval": _percentile_interval(values, alpha),
+    }
 
 
 def subject_sample_plan(

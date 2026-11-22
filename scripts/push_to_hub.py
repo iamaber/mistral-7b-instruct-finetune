@@ -48,7 +48,6 @@ def main() -> None:
         artifact=args.artifact,
         source_dir=args.source_dir,
     )
-    result["private"] = str(config.hub_private)
     print(json.dumps(result, indent=2))
 
 

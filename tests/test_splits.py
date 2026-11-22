@@ -1,16 +1,20 @@
-"""CPU-only tests for the train/validation/test split.
+"""CPU-only tests for the official test split, class balancing and the step guard.
 
-The published run selected its checkpoint with ``load_best_model_at_end`` on
-``eval_loss`` and then reported PubMedQA on the same 100 examples, so model
-selection leaked into the headline number. The split must keep the
-validation set used for selection disjoint from the reported test set.
+The published run reported a private 100-question re-split of the labeled pool
+(not PubMedQA's test set) and, with ~150 optimizer steps against
+``eval_steps=200``, never ran checkpoint selection at all.
 """
 
-import pytest
-from datasets import Dataset, load_from_disk
+from collections import Counter
 
-from src.pubmedqa_loraplus.config import LoRAPlusConfig
-from src.pubmedqa_loraplus.data import load_pubmedqa
+import pytest
+from datasets import Dataset
+
+from src.pubmedqa_loraplus.config import LoRAPlusConfig, planned_optimizer_steps
+from src.pubmedqa_loraplus.data import build_train_dataset, load_pubmedqa
+from src.pubmedqa_loraplus.splits import balanced_indices, official_test_labels
+
+TRUTH = official_test_labels()
 
 
 def _config(tmp_path, **overrides):
@@ -27,57 +31,123 @@ def _config(tmp_path, **overrides):
     )
 
 
-@pytest.fixture
-def cached_dataset(tmp_path):
-    dataset = Dataset.from_dict(
+def _save_labeled(tmp_path, truth=TRUTH):
+    pool_labels = ["yes"] * 276 + ["no"] * 169 + ["maybe"] * 55
+    pubids = [int(pubid) for pubid in truth] + [90_000_000 + i for i in range(500)]
+    decisions = list(truth.values()) + pool_labels
+    Dataset.from_dict(
         {
-            "pubid": [str(index) for index in range(1000)],
-            "question": [f"question {index}" for index in range(1000)],
-            "context": [{"contexts": [f"abstract {index}"]} for index in range(1000)],
-            "final_decision": ["yes", "no", "maybe"] * 333 + ["yes"],
+            "pubid": pubids,
+            "question": [f"question {pubid}" for pubid in pubids],
+            "context": [{"contexts": [f"abstract {pubid}"]} for pubid in pubids],
+            "long_answer": [f"conclusion {pubid}" for pubid in pubids],
+            "final_decision": decisions,
         }
-    )
-    destination = tmp_path / "dataset"
-    dataset.save_to_disk(str(destination))
-    return load_from_disk(str(destination))
+    ).save_to_disk(str(tmp_path / "dataset"))
 
 
-def test_split_has_train_validation_and_test(tmp_path, cached_dataset):
+def test_the_vendored_ground_truth_is_the_official_500(tmp_path):
+    assert len(TRUTH) == 500
+    assert Counter(TRUTH.values()) == {"yes": 276, "no": 169, "maybe": 55}
+
+
+def test_test_split_is_exactly_the_official_test_set(tmp_path):
+    _save_labeled(tmp_path)
+
     dataset = load_pubmedqa(_config(tmp_path))
 
-    assert set(dataset) == {"train", "validation", "test"}
+    assert set(dataset["test"]["pubid"]) == set(TRUTH)
+    assert dict(zip(dataset["test"]["pubid"], dataset["test"]["final_decision"])) == TRUTH
 
 
-def test_validation_is_disjoint_from_the_reported_test_set(tmp_path, cached_dataset):
+def test_train_and_validation_partition_the_remaining_pool(tmp_path):
+    _save_labeled(tmp_path)
+
     dataset = load_pubmedqa(_config(tmp_path))
 
-    validation_ids = set(dataset["validation"]["pubid"])
-    test_ids = set(dataset["test"]["pubid"])
-    train_ids = set(dataset["train"]["pubid"])
-
-    assert validation_ids.isdisjoint(test_ids)
-    assert validation_ids.isdisjoint(train_ids)
-    assert train_ids.isdisjoint(test_ids)
+    train, validation = set(dataset["train"]["pubid"]), set(dataset["validation"]["pubid"])
+    assert train.isdisjoint(validation)
+    assert (train | validation).isdisjoint(TRUTH)
+    assert len(train) + len(validation) == 500
 
 
-def test_split_covers_every_example_exactly_once(tmp_path, cached_dataset):
-    dataset = load_pubmedqa(_config(tmp_path))
+def test_validation_is_label_stratified(tmp_path):
+    _save_labeled(tmp_path)
 
-    total = sum(len(dataset[split]) for split in ("train", "validation", "test"))
-    assert total == len(cached_dataset)
+    dataset = load_pubmedqa(_config(tmp_path, validation_size=0.1))
 
-
-def test_split_sizes_follow_the_configured_fractions(tmp_path, cached_dataset):
-    dataset = load_pubmedqa(_config(tmp_path, test_size=0.1, validation_size=0.1))
-
-    assert len(dataset["test"]) == 100
-    assert len(dataset["validation"]) == 90
-    assert len(dataset["train"]) == 810
+    assert Counter(dataset["validation"]["final_decision"]) == {"yes": 28, "no": 17, "maybe": 6}
 
 
-def test_split_is_deterministic_for_a_fixed_seed(tmp_path, cached_dataset):
+def test_split_is_deterministic_for_a_fixed_seed(tmp_path):
+    _save_labeled(tmp_path)
+
     first = load_pubmedqa(_config(tmp_path, seed=42))
     second = load_pubmedqa(_config(tmp_path, seed=42))
 
-    assert list(first["test"]["pubid"]) == list(second["test"]["pubid"])
-    assert list(first["validation"]["pubid"]) == list(second["validation"]["pubid"])
+    assert first["validation"]["pubid"] == second["validation"]["pubid"]
+
+
+def test_a_dataset_missing_official_test_questions_is_rejected(tmp_path):
+    partial = dict(list(TRUTH.items())[:499])
+    _save_labeled(tmp_path, truth=partial)
+
+    with pytest.raises(ValueError, match="official test PMIDs"):
+        load_pubmedqa(_config(tmp_path))
+
+
+def test_a_label_that_disagrees_with_the_ground_truth_is_rejected(tmp_path):
+    pubid = next(iter(TRUTH))
+    wrong = {**TRUTH, pubid: "maybe" if TRUTH[pubid] != "maybe" else "yes"}
+    _save_labeled(tmp_path, truth=wrong)
+
+    with pytest.raises(ValueError, match="disagree"):
+        load_pubmedqa(_config(tmp_path))
+
+
+def test_balanced_train_set_has_equal_classes_and_keeps_every_example(tmp_path):
+    _save_labeled(tmp_path)
+    dataset = load_pubmedqa(_config(tmp_path))
+
+    train = build_train_dataset(dataset, _config(tmp_path, balance_train_classes=True))
+
+    counts = Counter(train["final_decision"])
+    assert len(set(counts.values())) == 1
+    assert set(train["pubid"]) == set(dataset["train"]["pubid"])
+
+
+def test_balanced_indices_repeat_minority_examples_evenly():
+    plan = balanced_indices(["yes"] * 7 + ["maybe"] * 3, seed=0)
+
+    repeats = Counter(plan)
+    assert Counter(["yes" if i < 7 else "maybe" for i in plan]) == {"yes": 7, "maybe": 7}
+    assert sorted(repeats[i] for i in range(7, 10)) == [2, 2, 3]
+
+
+def test_published_schedule_is_rejected_because_selection_never_ran(tmp_path):
+    published = _config(
+        tmp_path,
+        train_batch_size=4,
+        gradient_accumulation_steps=4,
+        num_epochs=3,
+        eval_steps=200,
+        save_steps=200,
+    )
+
+    with pytest.raises(ValueError, match="never evaluate"):
+        planned_optimizer_steps(published, train_examples=810)
+
+
+def test_default_schedule_evaluates_several_times(tmp_path):
+    config = _config(tmp_path)
+
+    steps = planned_optimizer_steps(config, train_examples=744)
+
+    assert steps // config.eval_steps >= 3
+
+
+def test_saving_less_often_than_evaluating_is_rejected(tmp_path):
+    config = _config(tmp_path, eval_steps=20, save_steps=40)
+
+    with pytest.raises(ValueError, match="save_steps must equal eval_steps"):
+        planned_optimizer_steps(config, train_examples=744)

@@ -5,6 +5,8 @@ from typing import Any
 
 from .artifact import prepare_adapter_for_publish
 from .config import LoRAPlusConfig
+from .prompts import build_user_message
+from .splits import OFFICIAL_TEST_SPLIT
 
 PUBMEDQA_CITATION = "\n".join(
     [
@@ -42,6 +44,179 @@ def _format_metric(value: Any, digits: int = 4) -> str:
     if isinstance(value, float):
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def _format_interval(interval: list[float] | None) -> str:
+    if not interval or len(interval) != 2:
+        return "not available"
+    return f"[{interval[0]:.4f}, {interval[1]:.4f}]"
+
+
+def _baseline_section(evaluation: dict[str, Any]) -> list[str]:
+    """Base-model zero-shot numbers and the paired delta, when the run recorded them."""
+    baseline = evaluation.get("baseline", {}).get("pubmedqa")
+    if not baseline:
+        return []
+    pubmedqa = evaluation.get("pubmedqa", {})
+    delta = evaluation.get("delta_vs_baseline", {})
+    rows = []
+    for name, key in (("Accuracy", "accuracy"), ("Macro F1", "macro_f1")):
+        change = delta.get(key, {})
+        rows.append(
+            f"| {name} | {_format_metric(baseline.get(key))} | "
+            f"{_format_metric(pubmedqa.get(key))} | {_format_metric(change.get('delta'))} | "
+            f"{_format_interval(change.get('interval'))} |"
+        )
+    lines = [
+        "### Base model (zero-shot) vs this fine-tune",
+        "",
+        "Same questions, same prompt, adapter disabled for the baseline. The interval is a "
+        "paired bootstrap over questions; a fine-tune has only shown an improvement when "
+        "the interval excludes zero.",
+        "",
+        "| Metric | Base model | Fine-tune | Delta | 95% interval of delta |",
+        "| --- | --- | --- | --- | --- |",
+        *rows,
+        "",
+    ]
+    if baseline.get("collapsed"):
+        lines.extend(["> The base model's predictions were also a single label.", ""])
+    base_mmlu = evaluation.get("baseline", {}).get("mmlu_medical", {})
+    tuned_mmlu = evaluation.get("mmlu_medical", {})
+    if "answer_line_accuracy" in base_mmlu and "answer_line_accuracy" in tuned_mmlu:
+        lines.extend(
+            [
+                "| Medical MMLU | Base model | Fine-tune |",
+                "| --- | --- | --- |",
+                "| Letter as first reply token | "
+                f"{_format_metric(base_mmlu.get('overall_accuracy'))} | "
+                f"{_format_metric(tuned_mmlu.get('overall_accuracy'))} |",
+                "| Letter after a short rationale | "
+                f"{_format_metric(base_mmlu['answer_line_accuracy'])} | "
+                f"{_format_metric(tuned_mmlu['answer_line_accuracy'])} |",
+                "",
+                "The first row penalises a model that learned to open with a written "
+                "conclusion; the second lets it reason first. A drop in both rows means the "
+                "fine-tune lost medical knowledge, not only its answer format.",
+                "",
+            ]
+        )
+    elif (
+        base_mmlu.get("overall_accuracy") is not None
+        and tuned_mmlu.get("overall_accuracy") is not None
+    ):
+        lines.extend(
+            [
+                f"Medical MMLU: base model {_format_metric(base_mmlu['overall_accuracy'])}, "
+                f"fine-tune {_format_metric(tuned_mmlu['overall_accuracy'])}. MMLU is scored "
+                "by the probability of the option letter as the first reply token. A fine-tune "
+                "that learned to open with a written conclusion can lose that score from the "
+                "format change alone, so read a drop here as unresolved, not as proven "
+                "forgetting.",
+                "",
+            ]
+        )
+    return lines
+
+
+SOURCE_URL = "https://github.com/iamaber/mistral-7b-instruct-finetune"
+
+
+def _official_pubmedqa(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """PubMedQA metrics only when they come from the official test set."""
+    if not report or report.get("test_split") != OFFICIAL_TEST_SPLIT:
+        return None
+    return report.get("evaluation", {}).get("pubmedqa") or None
+
+
+def _model_index(name: str, config: LoRAPlusConfig, report: dict[str, Any] | None) -> list[str]:
+    """Hub ``model-index`` metadata, so the scores show up in search and on the model page."""
+    pubmedqa = _official_pubmedqa(report)
+    if not pubmedqa or pubmedqa.get("collapsed"):
+        return []
+    return [
+        "model-index:",
+        f"  - name: {name}",
+        "    results:",
+        "      - task:",
+        "          type: question-answering",
+        "          name: Biomedical yes/no/maybe question answering",
+        "        dataset:",
+        "          name: PubMedQA (official 500-question test set)",
+        f"          type: {config.dataset_id}",
+        f"          config: {config.dataset_config}",
+        "          split: test",
+        "        metrics:",
+        "          - type: accuracy",
+        f"            value: {pubmedqa['accuracy']:.4f}",
+        "            name: Accuracy",
+        "          - type: f1",
+        f"            value: {pubmedqa['macro_f1']:.4f}",
+        "            name: Macro F1",
+        "        source:",
+        "          name: Self-reported, scored by the training repository",
+        f"          url: {SOURCE_URL}",
+    ]
+
+
+def _headline(config: LoRAPlusConfig, report: dict[str, Any] | None) -> list[str]:
+    """One-paragraph result summary for the top of the card."""
+    pubmedqa = _official_pubmedqa(report)
+    if not pubmedqa or pubmedqa.get("collapsed"):
+        return []
+    evaluation = (report or {}).get("evaluation", {})
+    base = evaluation.get("baseline", {}).get("pubmedqa", {})
+    base_text = (
+        f" (the untuned `{config.base_model_id}` scores {base['accuracy']:.3f} and "
+        f"{base['macro_f1']:.3f} on the same questions)"
+        if base
+        else ""
+    )
+    seeds = (report or {}).get("seed_summary")
+    seed_text = (
+        f" Across {len(seeds['runs'])} training seeds: accuracy "
+        f"{seeds['accuracy_mean']:.3f} ± {seeds['accuracy_sd']:.3f}, macro-F1 "
+        f"{seeds['macro_f1_mean']:.3f} ± {seeds['macro_f1_sd']:.3f}."
+        if seeds
+        else ""
+    )
+    how = (
+        "after writing a short conclusion drawn from the abstract"
+        if config.target_format == "rationale"
+        else "in one word"
+    )
+    return [
+        f"Answers PubMed research questions with yes, no or maybe, {how}. On PubMedQA's "
+        "official 500-question test set "
+        f"it scores **{pubmedqa['accuracy']:.3f} accuracy** and **{pubmedqa['macro_f1']:.3f} "
+        f"macro-F1**{base_text}.{seed_text} Training and evaluation code: {SOURCE_URL}.",
+        "",
+    ]
+
+
+def _seed_section(report: dict[str, Any]) -> list[str]:
+    """Spread of the same configuration over training seeds, when recorded."""
+    runs = report.get("seed_summary", {}).get("runs")
+    if not runs:
+        return []
+    rows = [
+        f"| {run['seed']} | {_format_metric(run['accuracy'])} | {_format_metric(run['macro_f1'])} |"
+        for run in runs
+    ]
+    summary = report["seed_summary"]
+    return [
+        "### Seed variation",
+        "",
+        f"The same configuration trained with {len(runs)} seeds. This card's adapter is "
+        f"seed {report['seed_summary']['published_seed']}, chosen before seeing test scores.",
+        "",
+        "| Seed | Accuracy | Macro F1 |",
+        "| --- | --- | --- |",
+        *rows,
+        f"| mean ± sd | {summary['accuracy_mean']:.4f} ± {summary['accuracy_sd']:.4f} | "
+        f"{summary['macro_f1_mean']:.4f} ± {summary['macro_f1_sd']:.4f} |",
+        "",
+    ]
 
 
 def _confusion_matrix_table(
@@ -114,11 +289,23 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
         ]
     )
 
+    intervals = pubmedqa.get("confidence_intervals")
+    if intervals:
+        lines.extend(
+            [
+                f"95% bootstrap intervals ({_format_metric(intervals.get('samples'))} "
+                f"resamples): accuracy {_format_interval(intervals.get('accuracy'))}, "
+                f"macro F1 {_format_interval(intervals.get('macro_f1'))}.",
+                "",
+            ]
+        )
+
+    lines.extend(_baseline_section(evaluation))
+    lines.extend(_seed_section(report))
+
     prediction_counts = pubmedqa.get("prediction_counts")
     if prediction_counts:
-        rendered = ", ".join(
-            f"{label}: {prediction_counts.get(label, 0)}" for label in label_order
-        )
+        rendered = ", ".join(f"{label}: {prediction_counts.get(label, 0)}" for label in label_order)
         lines.append(f"Predicted-label distribution: {rendered}.")
         lines.append("")
 
@@ -151,9 +338,7 @@ def _evaluation_section(report: dict[str, Any] | None) -> list[str]:
     covered = mmlu.get("covered_subjects")
     subject_results = mmlu.get("subject_results", {})
     evaluated_subjects = [
-        subject
-        for subject, result in subject_results.items()
-        if result.get("total", 0) > 0
+        subject for subject, result in subject_results.items() if result.get("total", 0) > 0
     ]
     lines.extend(
         [
@@ -301,22 +486,27 @@ def _limitations_section(report: dict[str, Any] | None) -> list[str]:
             if validation_examples is not None
             else ""
         )
-        lines.append(
-            f"- **Small evaluation.** The reported metrics rest on {size}{split_note}, far "
-            "too little to characterise a 7B model, and the holdout comes from PubMedQA's "
-            "`pqa_labeled` training pool rather than the official test set."
-        )
+        if report.get("test_split") == OFFICIAL_TEST_SPLIT:
+            lines.append(
+                f"- **One benchmark, one run.** The reported metrics rest on {size} (PubMedQA's "
+                f"official test set){split_note} from a single training seed. A 500-question "
+                "test cannot resolve differences much smaller than ~9 points of accuracy."
+            )
+        else:
+            lines.append(
+                f"- **Small evaluation.** The reported metrics rest on {size}{split_note}, far "
+                "too little to characterise a 7B model, and the holdout comes from PubMedQA's "
+                "`pqa_labeled` training pool rather than the official test set."
+            )
     else:
         lines.append(
-            "- **Small evaluation scale.** The pipeline holds out a fraction of "
-            "PubMedQA's `pqa_labeled` training pool, which is not the official test set and "
-            "is too little to characterise a 7B model."
+            "- **No evaluation report.** Nothing about prediction quality on PubMedQA's "
+            "official test set is recorded for this artifact."
         )
 
     lines.extend(
         [
-            "- **English only**, and only on PubMed-style abstracts and multiple-choice "
-            "questions.",
+            "- **English only**, and only on PubMed-style abstracts and multiple-choice questions.",
             "- **Training-data bias carries over** from the base model and from PubMedQA's "
             "published-literature selection.",
             "",
@@ -325,13 +515,41 @@ def _limitations_section(report: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def _generation_lines(
+    target_format: str, max_new_tokens: int, template_kwargs: dict[str, Any]
+) -> list[str]:
+    user_text = build_user_message("<question>", "<abstract text>", target_format)
+    extra = "".join(f", {key}={value!r}" for key, value in template_kwargs.items())
+    return [
+        f'messages = [{{"role": "user", "content": {user_text!r}}}]',
+        "inputs = tokenizer.apply_chat_template(",
+        f'    messages, add_generation_prompt=True, return_tensors="pt", return_dict=True{extra}',
+        ").to(model.device)",
+        "with torch.no_grad():",
+        f"    output = model.generate(**inputs, max_new_tokens={max_new_tokens}, do_sample=False)",
+        'new_tokens = output[0][inputs["input_ids"].shape[-1]:]',
+        "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+    ]
+
+
 def _usage_section(
+    config: LoRAPlusConfig,
     artifact: str,
-    base_model_id: str,
     repo_id: str | None,
     collapsed: bool | None,
 ) -> list[str]:
     target = repo_id or "<this-repo-id>"
+    max_new_tokens = 8
+    if config.target_format == "rationale":
+        max_new_tokens = config.rationale_max_new_tokens + 8
+    generation = _generation_lines(
+        config.target_format, max_new_tokens, dict(config.chat_template_kwargs)
+    )
+    answer_note = (
+        "The model writes a short conclusion and ends with `Answer: yes|no|maybe`."
+        if config.target_format == "rationale"
+        else "The model answers with one word: `yes`, `no` or `maybe`."
+    )
     if artifact == "adapter":
         return [
             "## Usage",
@@ -344,27 +562,21 @@ def _usage_section(
             "from peft import PeftModel",
             "from transformers import AutoModelForCausalLM, AutoTokenizer",
             "",
-            f'base_model_id = "{base_model_id}"',
+            f'base_model_id = "{config.base_model_id}"',
             "",
             "tokenizer = AutoTokenizer.from_pretrained(base_model_id)",
             "base_model = AutoModelForCausalLM.from_pretrained(",
             "    base_model_id,",
-            "    torch_dtype=torch.bfloat16,",
-            "    device_map=\"auto\",",
+            "    dtype=torch.bfloat16,",
+            '    device_map="auto",',
             ")",
             f'model = PeftModel.from_pretrained(base_model, "{target}")',
             "model.eval()",
             "",
-            "prompt = (",
-            "    \"<s>[INST] Context: <abstract text>\\n\\n\"",
-            "    \"Question: <question> [/INST]\"",
-            ")",
-            "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
-            "with torch.no_grad():",
-            "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-            "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
-            "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+            *generation,
             "```",
+            "",
+            answer_note,
             "",
             "The adapter config stores the base model as a Hub id, so the snippet above "
             "resolves the base without needing a local copy of the training files.",
@@ -386,21 +598,15 @@ def _usage_section(
         f'tokenizer = AutoTokenizer.from_pretrained("{target}")',
         "model = AutoModelForCausalLM.from_pretrained(",
         f'    "{target}",',
-        "    torch_dtype=torch.bfloat16,",
-        "    device_map=\"auto\",",
+        "    dtype=torch.bfloat16,",
+        '    device_map="auto",',
         ")",
         "model.eval()",
         "",
-        "prompt = (",
-        "    \"<s>[INST] Context: <abstract text>\\n\\n\"",
-        "    \"Question: <question> [/INST]\"",
-        ")",
-        "inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)",
-        "with torch.no_grad():",
-        "    output = model.generate(**inputs, max_new_tokens=8, do_sample=False)",
-        "new_tokens = output[0][inputs[\"input_ids\"].shape[-1]:]",
-        "print(tokenizer.decode(new_tokens, skip_special_tokens=True))",
+        *generation,
         "```",
+        "",
+        answer_note,
         "",
         *_collapse_expectation(collapsed),
         "",
@@ -413,14 +619,20 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
 
     report = _load_report(config)
     library_name = "peft" if artifact == "adapter" else "transformers"
-    repo_id = (
-        config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
+    repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
+    base_name = config.base_model_id.split("/")[-1]
+    name = repo_id.split("/")[-1] if repo_id else config.run_name
+    kind = "LoRA+ adapter" if artifact == "adapter" else "merged LoRA+ model"
+    title = f"{base_name} for PubMedQA ({kind})"
+    collapsed = _pubmedqa_collapsed(report)
+    purpose = (
+        "It is published for reproducibility and as a record of a negative result, not "
+        "as a model intended to be deployed."
+        if collapsed
+        else "It is published for research and reproducibility, with every number below "
+        "measured on PubMedQA's official test set."
     )
-    title = (
-        f"{config.run_name} (LoRA+ adapter)"
-        if artifact == "adapter"
-        else f"{config.run_name} (merged)"
-    )
+    family = base_name.split("-")[0].lower()
 
     lines: list[str] = [
         "---",
@@ -436,46 +648,49 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         *(["  - peft"] if artifact == "adapter" else []),
         "  - lora",
         "  - loraplus",
+        f"  - {family}",
         "  - pubmedqa",
+        "  - biomedical",
         "  - medical",
-        "  - experimental",
+        "  - question-answering",
+        "  - research",
+        *_model_index(name, config, report),
         "---",
         "",
         f"# {title}",
         "",
-        "> **This is an experiment, not a usable medical model.** It is a small LoRA+ "
-        "research run on PubMedQA. Do not use it for clinical decision-making, "
-        "diagnosis, triage, or any other medical purpose. Read the evaluation and "
-        "limitations sections before drawing any conclusion.",
+        *_headline(config, report),
+        "> **Research use only. This is not a usable medical model.** Do not use it for "
+        "clinical decision-making, diagnosis, triage, or any other medical purpose. Read "
+        "the evaluation and limitations sections before drawing any conclusion.",
         "",
         "## What this is",
         "",
         f"A LoRA+ fine-tune of `{config.base_model_id}` on "
-        f"`{config.dataset_id}` / `{config.dataset_config}`, trained as a "
-        "single-GPU research exercise to check the training and evaluation pipeline "
-        "end to end. It is published for reproducibility and as a record of a negative "
-        "result, not as a model intended to be deployed.",
+        f"`{config.dataset_id}` / `{config.dataset_config}`: given a PubMed abstract and a "
+        "research question, it answers yes, no or maybe. "
+        f"{purpose}",
         "",
         "## Intended use",
         "",
-        "- Inspecting what a small LoRA+ run on PubMedQA's labeled pool does to a 7B "
-        "instruction-tuned model.",
-        "- Reproducing the evaluation and extending it: whatever the run produced is "
-        "recorded in the evaluation section, including an explicitly flagged collapse if "
-        "the predictions were degenerate.",
+        "- Research on biomedical question answering and on fine-tuning methods for it.",
+        "- A reproducible starting point: the training and evaluation code, the "
+        "per-question predictions and the zero-shot baseline are all recorded.",
         "",
         "## Out-of-scope use",
         "",
         "- Any clinical, diagnostic, triage, or treatment decision.",
-        "- Any claim that this model answers biomedical questions correctly.",
-        "- Any comparison against published PubMedQA results as if the reported accuracy "
-        "were a real result.",
+        "- Any claim that this model answers biomedical questions correctly in general.",
+        (
+            "- Any comparison against published PubMedQA results as if the reported "
+            "accuracy were a real result."
+            if collapsed
+            else "- Reading a single training run's score as a clinical accuracy figure."
+        ),
         "",
     ]
 
-    lines.extend(
-        _usage_section(artifact, config.base_model_id, repo_id, _pubmedqa_collapsed(report))
-    )
+    lines.extend(_usage_section(config, artifact, repo_id, _pubmedqa_collapsed(report)))
 
     lines.extend(
         [
@@ -484,6 +699,7 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             f"- Base model: `{config.base_model_id}`",
             f"- Dataset: `{config.dataset_id}` / `{config.dataset_config}`",
             f"- Artifact type: `{artifact}`",
+            f"- Target: `{config.target_format}`",
             (
                 f"- LoRA+: rank={config.lora_r}, alpha={config.lora_alpha}, "
                 f"dropout={config.lora_dropout}, lr_ratio={config.loraplus_lr_ratio}"
@@ -511,10 +727,8 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
                 _format_metric(training_metrics.get("train_loss")),
             ),
             (
-                "Best eval loss",
-                _format_metric(
-                    summary.get("best_eval_loss", training.get("best_eval_loss"))
-                ),
+                "Best validation macro F1 (selection metric)",
+                _format_metric(summary.get("best_validation_macro_f1")),
             ),
             (
                 "Latest eval loss",
@@ -544,10 +758,11 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
             "## Training data",
             "",
             "`qiaojin/PubMedQA` (`pqa_labeled`), 1,000 expert-annotated biomedical "
-            "research questions with yes/no/maybe decisions. The pipeline holds out a test "
-            "split and a separate validation split used for checkpoint selection. PubMedQA "
-            "is released under the MIT licence; its abstracts are derived from PubMed and "
-            "remain subject to the original publishers' terms.",
+            "research questions with yes/no/maybe decisions. Runs from this pipeline report "
+            "on PubMedQA's official 500-question test set, selected by PMID, and train on the "
+            "other 500 minus a stratified validation split used for checkpoint selection. "
+            "PubMedQA is released under the MIT licence; its abstracts are derived from "
+            "PubMed and remain subject to the original publishers' terms.",
             "",
         ]
     )
@@ -556,12 +771,10 @@ def build_model_card(config: LoRAPlusConfig, artifact: str) -> str:
         [
             "## Licence",
             "",
-            f"- This adapter/model is released under **Apache-2.0**, matching the "
-            f"`{config.base_model_id}` base model, which is itself Apache-2.0.",
-            "- Using or redistributing the base model is subject to the Mistral AI "
-            "licence terms that accompany it, not to this repository alone.",
-            "- PubMedQA is MIT-licensed; see its dataset card for the abstract "
-            "provenance terms.",
+            "- This adapter/model is released under **Apache-2.0**.",
+            f"- Using or redistributing the base model `{config.base_model_id}` is subject "
+            "to the licence that accompanies it, not to this repository alone.",
+            "- PubMedQA is MIT-licensed; see its dataset card for the abstract provenance terms.",
             "",
             "## Citation",
             "",
@@ -581,24 +794,35 @@ def push_artifact_to_hub(
     config: LoRAPlusConfig,
     artifact: str,
     source_dir: str | Path | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if artifact not in {"adapter", "merged"}:
         raise ValueError("artifact must be 'adapter' or 'merged'")
 
-    repo_id = (
-        config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
-    )
+    repo_id = config.adapter_hub_repo_id if artifact == "adapter" else config.merged_hub_repo_id
     if not repo_id:
         raise ValueError(f"No Hugging Face repo configured for {artifact} artifact")
 
-    artifact_dir = Path(source_dir) if source_dir is not None else (
-        config.adapter_output_dir if artifact == "adapter" else config.merged_output_dir
+    artifact_dir = (
+        Path(source_dir)
+        if source_dir is not None
+        else (config.adapter_output_dir if artifact == "adapter" else config.merged_output_dir)
     )
     if not artifact_dir.exists():
         raise FileNotFoundError(f"Artifact directory does not exist: {artifact_dir}")
 
+    allow_patterns = ["README.md", "tokenizer*", "special_tokens_map.json", "chat_template.jinja"]
     if artifact == "adapter":
-        prepare_adapter_for_publish(artifact_dir, config.base_model_id)
+        prepare_adapter_for_publish(artifact_dir, config.base_model_id, config.base_model_revision)
+        allow_patterns.extend(["adapter_config.json", "adapter_model.safetensors"])
+    else:
+        allow_patterns.extend(
+            [
+                "config.json",
+                "generation_config.json",
+                "*.safetensors",
+                "model.safetensors.index.json",
+            ]
+        )
 
     from huggingface_hub import HfApi
 
@@ -617,10 +841,15 @@ def push_artifact_to_hub(
         folder_path=str(artifact_dir),
         repo_id=repo_id,
         repo_type="model",
+        allow_patterns=allow_patterns,
     )
+    # create_repo leaves an existing repo's visibility alone; apply the configured one
+    # after the upload so a repo never goes public with a stale card.
+    api.update_repo_settings(repo_id=repo_id, private=config.hub_private, repo_type="model")
 
     return {
         "artifact": artifact,
         "repo_id": repo_id,
         "source_dir": str(artifact_dir),
+        "private": config.hub_private,
     }

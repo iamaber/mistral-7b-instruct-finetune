@@ -37,7 +37,7 @@ def _report(**overrides):
             "train_metrics": {"train_loss": 0.4810},
         },
         "training_summary": {
-            "best_eval_loss": 0.5188,
+            "best_validation_macro_f1": 0.6123,
             "latest_eval_loss": 0.5188,
             "train_runtime": 566.5676,
         },
@@ -136,7 +136,7 @@ def test_card_renders_run_details_from_the_shared_report(tmp_path):
     assert "| Eval examples | 100 |" in card
     assert "| Global step | 171 |" in card
     assert "| Train loss (final) | 0.4810 |" in card
-    assert "| Best eval loss | 0.5188 |" in card
+    assert "| Best validation macro F1 (selection metric) | 0.6123 |" in card
     assert "| Latest eval loss | 0.5188 |" in card
     assert "| Train runtime (s) | 566.5676 |" in card
     assert "not available" not in card
