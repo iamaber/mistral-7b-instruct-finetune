@@ -699,8 +699,19 @@ def push_artifact_to_hub(
     if not artifact_dir.exists():
         raise FileNotFoundError(f"Artifact directory does not exist: {artifact_dir}")
 
+    allow_patterns = ["README.md", "tokenizer*", "special_tokens_map.json", "chat_template.jinja"]
     if artifact == "adapter":
         prepare_adapter_for_publish(artifact_dir, config.base_model_id)
+        allow_patterns.extend(["adapter_config.json", "adapter_model.safetensors"])
+    else:
+        allow_patterns.extend(
+            [
+                "config.json",
+                "generation_config.json",
+                "*.safetensors",
+                "model.safetensors.index.json",
+            ]
+        )
 
     from huggingface_hub import HfApi
 
@@ -719,6 +730,7 @@ def push_artifact_to_hub(
         folder_path=str(artifact_dir),
         repo_id=repo_id,
         repo_type="model",
+        allow_patterns=allow_patterns,
     )
 
     return {

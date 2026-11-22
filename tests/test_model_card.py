@@ -6,11 +6,15 @@ limitations, language or citation. These tests pin the honesty requirements.
 """
 
 import json
+from fnmatch import fnmatchcase
+from pathlib import Path
+from unittest.mock import Mock
 
+import huggingface_hub
 import pytest
 
 from src.pubmedqa_loraplus.config import LoRAPlusConfig
-from src.pubmedqa_loraplus.hub import build_model_card
+from src.pubmedqa_loraplus.hub import build_model_card, push_artifact_to_hub
 
 BASE_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 
@@ -83,6 +87,60 @@ def _config(tmp_path, **overrides):
 @pytest.fixture
 def config(tmp_path):
     return _config(tmp_path)
+
+
+@pytest.mark.parametrize("artifact", ["adapter", "merged"])
+def test_push_uploads_only_model_files(tmp_path, monkeypatch, artifact):
+    config = _config(
+        tmp_path,
+        adapter_hub_repo_id="owner/test-adapter",
+        merged_hub_repo_id="owner/test-merged",
+    )
+    checkpoint = tmp_path / "checkpoint-40"
+    checkpoint.mkdir()
+    adapter_files = {"adapter_config.json", "adapter_model.safetensors"}
+    merged_files = {
+        "config.json",
+        "generation_config.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "model.safetensors.index.json",
+    }
+    tokenizer_files = {
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokenizer.model.v3",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+    }
+    trainer_files = {
+        "optimizer.pt",
+        "scheduler.pt",
+        "rng_state.pth",
+        "trainer_state.json",
+        "training_args.bin",
+    }
+    model_files = adapter_files if artifact == "adapter" else merged_files
+    extra_files = merged_files if artifact == "adapter" else {"model.bin"}
+    for filename in model_files | tokenizer_files | trainer_files | extra_files:
+        (checkpoint / filename).touch()
+    if artifact == "adapter":
+        (checkpoint / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    api = Mock()
+    monkeypatch.setattr(huggingface_hub, "HfApi", Mock(return_value=api))
+    push_artifact_to_hub(config, artifact, source_dir=checkpoint)
+
+    upload = api.upload_folder.call_args.kwargs
+    patterns = upload["allow_patterns"]
+    assert patterns
+    assert not any(fnmatchcase(name, pattern) for name in trainer_files for pattern in patterns)
+    matched_files = {
+        path.name
+        for path in Path(upload["folder_path"]).iterdir()
+        if path.is_file() and any(fnmatchcase(path.name, pattern) for pattern in patterns)
+    }
+    assert matched_files == model_files | tokenizer_files | {"README.md"}
 
 
 @pytest.mark.parametrize("artifact", ["adapter", "merged"])
