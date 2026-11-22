@@ -3,7 +3,7 @@ import logging
 import os
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ from peft.optimizers import create_loraplus_optimizer
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
 from .artifact import prepare_adapter_for_publish
-from .config import LoRAPlusConfig, planned_optimizer_steps
+from .config import LoRAPlusConfig, baseline_cache_key, planned_optimizer_steps
 from .data import CompletionOnlyCollator, build_train_dataset, load_pubmedqa, tokenize_dataset
 from .evaluation import evaluate_pubmedqa, run_evaluation_suite
 from .prompts import ChatFormat
@@ -300,10 +300,12 @@ def train_model(config: LoRAPlusConfig) -> dict[str, Any]:
 
     baseline = None
     if config.evaluate_base_model:
-        with trainer.model.disable_adapter():
-            baseline, baseline_predictions = run_evaluation_suite(
-                trainer.model, tokenizer, dataset["test"], config
-            )
+
+        def evaluate_base() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            with trainer.model.disable_adapter():
+                return run_evaluation_suite(trainer.model, tokenizer, dataset["test"], config)
+
+        baseline, baseline_predictions = cached_baseline(config, evaluate_base)
         _write_jsonl(config.baseline_predictions_path, baseline_predictions)
 
     LOGGER.info(
@@ -401,14 +403,40 @@ def load_model_for_artifact(
     return model, tokenizer
 
 
+def cached_baseline(
+    config: LoRAPlusConfig,
+    compute: Callable[[], tuple[dict[str, Any], list[dict[str, Any]]]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Reuse the zero-shot baseline for identical base-model settings, else compute it.
+
+    The baseline ignores training hyperparameters, so sweep variants and reruns
+    share one evaluation instead of re-scoring the base model every time.
+    """
+    path = config.reports_root / "baselines" / f"{baseline_cache_key(config)}.json"
+    if path.exists():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        LOGGER.info("Reusing cached base-model baseline %s", path)
+        return payload["evaluation"], payload["predictions"]
+    evaluation, predictions = compute()
+    _write_json(path, {"evaluation": evaluation, "predictions": predictions})
+    return evaluation, predictions
+
+
 def evaluate_artifact(
     config: LoRAPlusConfig,
     artifact: str,
     model_path: str | Path | None = None,
 ) -> dict[str, Any]:
     dataset = load_pubmedqa(config)
-    model, tokenizer = load_model_for_artifact(config, artifact, model_path=model_path)
-    evaluation, predictions = run_evaluation_suite(model, tokenizer, dataset["test"], config)
+
+    def evaluate_model() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        model, tokenizer = load_model_for_artifact(config, artifact, model_path=model_path)
+        return run_evaluation_suite(model, tokenizer, dataset["test"], config)
+
+    if artifact == "base":
+        evaluation, predictions = cached_baseline(config, evaluate_model)
+    else:
+        evaluation, predictions = evaluate_model()
     stem = f"{config.run_name}_{artifact}"
     output_path = config.reports_root / f"{stem}_eval.json"
     predictions_path = _write_jsonl(config.reports_root / f"{stem}_predictions.jsonl", predictions)

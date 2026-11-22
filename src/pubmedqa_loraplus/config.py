@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass, field
@@ -5,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import resolve_repo_path
-from .prompts import TARGET_FORMATS
+from .prompts import TARGET_FORMATS, build_user_message
 
 VALID_MODEL_DTYPES = {"auto", "float32", "float16", "bfloat16"}
 
@@ -43,8 +44,8 @@ class LoRAPlusConfig:
     loraplus_lr_embedding: float = 1e-6
     num_epochs: int = 3
     logging_steps: int = 10
-    save_steps: int = 20
-    eval_steps: int = 20
+    save_steps: int = 40
+    eval_steps: int = 40
     lora_r: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.05
@@ -194,3 +195,26 @@ def planned_optimizer_steps(
         # A best evaluation at an unsaved step leaves load_best_model_at_end nothing to load.
         raise ValueError("save_steps must equal eval_steps for best-model selection")
     return steps
+
+
+def baseline_cache_key(config: LoRAPlusConfig) -> str:
+    """Hash of every setting the zero-shot baseline depends on, and nothing it doesn't.
+
+    Training hyperparameters are excluded, so every variant of a sweep shares one
+    baseline. The rendered instruction is included, so a prompt edit invalidates it.
+    """
+    fields = {
+        "base_model_id": config.base_model_id,
+        "base_model_revision": config.base_model_revision,
+        "dataset": [config.dataset_id, config.dataset_config, config.dataset_revision],
+        "mmlu": [config.mmlu_dataset_id, config.mmlu_revision, config.mmlu_eval_samples],
+        "model_dtype": config.model_dtype,
+        "target_format": config.target_format,
+        "user_message": build_user_message("{question}", "{context}", config.target_format),
+        "chat_template_kwargs": config.chat_template_kwargs,
+        "max_length": config.max_length,
+        "rationale_max_new_tokens": config.rationale_max_new_tokens,
+        "bootstrap": [config.bootstrap_samples, config.seed],
+    }
+    encoded = json.dumps(fields, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]

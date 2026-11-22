@@ -41,17 +41,34 @@ def _model_device(model: Any) -> torch.device:
     return next(model.parameters()).device
 
 
-def _choice_log_probs(
+def _left_padded(model: Any, sequences: list[list[int]], pad_id: int) -> dict[str, torch.Tensor]:
+    """Left-pad so every sequence ends at the last column."""
+    width = max(len(ids) for ids in sequences)
+    device = _model_device(model)
+    input_ids = torch.tensor(
+        [[pad_id] * (width - len(ids)) + ids for ids in sequences], dtype=torch.long, device=device
+    )
+    attention_mask = torch.tensor(
+        [[0] * (width - len(ids)) + [1] * len(ids) for ids in sequences],
+        dtype=torch.long,
+        device=device,
+    )
+    return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+def _next_token_log_probs(
     model: Any,
-    input_ids: list[int],
-    choice_ids: dict[str, int],
-) -> dict[str, float]:
-    """Log-probability of each choice's decision token at the next position."""
-    tensor = torch.tensor([input_ids], dtype=torch.long, device=_model_device(model))
+    sequences: list[list[int]],
+    pad_id: int,
+) -> torch.Tensor:
+    """``(batch, vocab)`` log-probabilities of the token after each sequence, in one forward."""
+    batch = _left_padded(model, sequences, pad_id)
+    # Forward (unlike generate) does not derive positions from the mask, so pass them
+    # explicitly; otherwise padding would shift every shorter sequence's positions.
+    position_ids = (batch["attention_mask"].cumsum(-1) - 1).clamp(min=0)
     with torch.no_grad():
-        logits = model(input_ids=tensor, attention_mask=torch.ones_like(tensor)).logits
-    log_probs = torch.log_softmax(logits[0, -1].float(), dim=-1)
-    return {choice: float(log_probs[token_id]) for choice, token_id in choice_ids.items()}
+        logits = model(**batch, position_ids=position_ids, logits_to_keep=1).logits
+    return torch.log_softmax(logits[:, -1].float(), dim=-1)
 
 
 def _generate_batch(
@@ -60,30 +77,19 @@ def _generate_batch(
     prompts: list[list[int]],
     max_new_tokens: int,
 ) -> list[str]:
-    """Greedy continuations of left-padded prompts, stopping at ``Answer:``."""
-    pad_id = tokenizer.pad_token_id
-    width = max(len(ids) for ids in prompts)
-    input_ids = torch.tensor(
-        [[pad_id] * (width - len(ids)) + ids for ids in prompts],
-        dtype=torch.long,
-        device=_model_device(model),
-    )
-    attention_mask = torch.tensor(
-        [[0] * (width - len(ids)) + [1] * len(ids) for ids in prompts],
-        dtype=torch.long,
-        device=input_ids.device,
-    )
+    """Greedy continuations of left-padded prompts, stopping at the answer line."""
+    batch = _left_padded(model, prompts, tokenizer.pad_token_id)
     with torch.no_grad():
         output = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            **batch,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             use_cache=True,
             stop_strings=[ANSWER_LINE],
             tokenizer=tokenizer,
-            pad_token_id=pad_id,
+            pad_token_id=tokenizer.pad_token_id,
         )
+    width = batch["input_ids"].shape[1]
     return tokenizer.batch_decode(output[:, width:], skip_special_tokens=True)
 
 
@@ -132,12 +138,19 @@ class PubMedQAPredictor:
             )
             rationales = [extract_rationale(text) for text in generated]
 
-        records = []
-        for example, prompt_ids, rationale in zip(examples, prompts, rationales):
+        sequences = []
+        choices = []
+        for prompt_ids, rationale in zip(prompts, rationales):
             lead_ids, choice_ids = choice_token_ids(
                 self.tokenizer, self._lead_text(rationale), PUBMEDQA_LABELS
             )
-            scores = _choice_log_probs(self.model, prompt_ids + lead_ids, choice_ids)
+            sequences.append(prompt_ids + lead_ids)
+            choices.append(choice_ids)
+        log_probs = _next_token_log_probs(self.model, sequences, self.tokenizer.pad_token_id)
+
+        records = []
+        for row, (example, rationale, choice_ids) in enumerate(zip(examples, rationales, choices)):
+            scores = {label: float(log_probs[row, token]) for label, token in choice_ids.items()}
             label, tied = choose_label(scores, order=PUBMEDQA_LABELS)
             records.append(
                 {
@@ -266,7 +279,8 @@ def evaluate_mmlu_medical(
         )
         prompt = chat_format.render_prompt(tokenizer, user_text)
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        scores = _choice_log_probs(model, prompt_ids + lead_ids, choice_ids)
+        log_probs = _next_token_log_probs(model, [prompt_ids + lead_ids], tokenizer.pad_token_id)
+        scores = {choice: float(log_probs[0, token]) for choice, token in choice_ids.items()}
         prediction, _ = choose_label(scores, order=MMLU_CHOICES)
         subject = example["subject"]
         subject_results[subject]["total"] += 1

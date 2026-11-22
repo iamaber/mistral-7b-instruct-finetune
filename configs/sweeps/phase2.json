@@ -1,0 +1,9 @@
+[
+  {"run_name": "sweep-rationale-seed42"},
+  {"run_name": "sweep-rationale-seed1", "seed": 1},
+  {"run_name": "sweep-rationale-seed2", "seed": 2},
+  {"run_name": "sweep-label", "target_format": "label"},
+  {"run_name": "sweep-unbalanced", "balance_train_classes": false},
+  {"run_name": "sweep-artificial-4k", "pqa_artificial_samples": 4000},
+  {"run_name": "sweep-old-loraplus-lr", "learning_rate": 5e-05, "loraplus_lr_ratio": 16.0}
+]

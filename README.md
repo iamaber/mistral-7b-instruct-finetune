@@ -16,13 +16,17 @@ modal run modal_app.py --action smoke                      # L4, Qwen2.5-0.5B, 1
 modal run modal_app.py --action train                      # H100, full config
 modal run modal_app.py --action evaluate --artifact base   # zero-shot baseline only
 modal run modal_app.py --action train --overrides '{"target_format": "label"}'
+modal run modal_app.py --action sweep --sweep configs/sweeps/phase2.json   # parallel GPUs
 ```
 
 Each run prints a compact summary (test metrics with 95% intervals, baseline,
 paired delta, best checkpoint) and writes the full report to
-`reports/modal/<run_name>.json` locally and to `reports/` on the volume. The
-Modal app never pushes to the Hub; publishing stays an explicit step
-(`scripts/push_to_hub.py` or the notebook's last cell).
+`reports/modal/<run_name>.json` locally and to `reports/` on the volume. A sweep
+trains every variant on its own GPU at once and prints one comparison table.
+The zero-shot baseline is cached under `reports/baselines/` by every setting it
+depends on, so variants and reruns reuse it. The Modal app never pushes to the
+Hub; publishing stays an explicit step (`scripts/push_to_hub.py` or the
+notebook's last cell).
 
 ## Modal Notebook Workflow
 
